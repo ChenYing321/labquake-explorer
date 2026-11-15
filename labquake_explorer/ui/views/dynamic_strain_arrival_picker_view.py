@@ -2,9 +2,11 @@
 
 The figure stacks the four mechanical traces (which can be hidden) above the
 record's waveforms (strain gauges or PZTs), each drawn at its sensor position
-along the fault, on a time axis in ms from the event time.  One draggable
-marker per shown channel marks the arrival; a straight line through the
-markers of the *fitting* channels gives the rupture speed ``Cf``.
+along the fault, on a time axis in ms from the event time.  One handle per shown channel, a
+short vertical bar, marks the arrival: it is dragged along the time axis
+only and snaps to a sample, or the arrival of the selected channel is typed
+in ms.  A straight line through the picks of the *fitting* channels gives
+the rupture speed ``Cf``.
 
 The controls sit in a scrolling column on the left: the event and the record,
 a table of the channels (name, position, arrival, whether it is shown and
@@ -31,7 +33,6 @@ from tkinter import ttk
 import warnings
 from typing import Optional
 
-import matplotlib.patches as patches
 import numpy as np
 from scipy import signal
 
@@ -56,6 +57,8 @@ DEFAULT_TRACE_AMPLITUDE_MM = 12.0     # trace amplitude when the sensor spacing 
 ZOOM_MARGIN_FRACTION = 0.5            # "Zoom to picks": this share of the picks' spread on each side ...
 ZOOM_MIN_HALFWIDTH_FRACTION = 0.02    # ... and at least this share of the record
 TEXT_WRAP_PX = 280
+HANDLE_PX = 6                         # a press this close (px) to a pick handle grabs it
+HANDLE_INSET_FRACTION = 0.1           # a handle spans its trace's height less this share at each end
 CHECK = "✓"
 TABLE_COLUMNS = (("channel", 70), ("x (mm)", 60), ("arrival (ms)", 85), ("show", 42), ("fit", 36))
 MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
@@ -83,9 +86,7 @@ class DynamicStrainArrivalPickerView(EventView):
         self.ax_wave = None
         self.fitting_markers = []
         self.not_fitting_markers = []
-        self.offset = [0, 0]
-        self.current_artist = None
-        self.currently_dragging = False
+        self._drag = None                   # the channel whose handle is being dragged
         self.rupture_speed = None
         self.fitted_line = None
         self.filtering = False
@@ -140,6 +141,21 @@ class DynamicStrainArrivalPickerView(EventView):
         buttons.grid(row=2, column=0, columnspan=2, padx=2, pady=2, sticky="w")
         ttk.Button(buttons, text="Show all", command=lambda: self.set_all_shown(True)).pack(side="left", padx=2)
         ttk.Button(buttons, text="Fit all shown", command=self.fit_all_shown).pack(side="left", padx=2)
+        row = ttk.Frame(frame)
+        row.grid(row=3, column=0, columnspan=2, padx=2, pady=2, sticky="w")
+        self.channel_label_var = tk.StringVar(master=self, value="")
+        ttk.Label(row, textvariable=self.channel_label_var, width=8).pack(side="left", padx=2)
+        ttk.Button(row, text="\u25c0", width=2, command=lambda: self.step_channel(-1)).pack(side="left")
+        ttk.Button(row, text="\u25b6", width=2, command=lambda: self.step_channel(+1)).pack(side="left")
+        ttk.Label(row, text="arrival (ms):").pack(side="left", padx=(8, 2))
+        self.arrival_var = tk.StringVar(master=self, value="")
+        self.arrival_entry = ttk.Entry(row, textvariable=self.arrival_var, width=10)
+        self.arrival_entry.pack(side="left", padx=2)
+        for sequence in ("<Return>", "<FocusOut>"):
+            self.arrival_entry.bind(sequence, self.on_arrival_typed, add="+")
+        ttk.Label(frame, text="drag a pick along the time axis, or type the selected channel's arrival",
+                  foreground="#606060", wraplength=TEXT_WRAP_PX, justify="left").grid(
+            row=4, column=0, columnspan=2, padx=4, sticky="w")
 
         frame = ttk.LabelFrame(left, text="View")
         frame.pack(fill="x", pady=4)
@@ -192,7 +208,6 @@ class DynamicStrainArrivalPickerView(EventView):
                          row=0, column=0, sticky="nsew")
         self.fig = self.figure  # legacy alias
 
-        self.figure.canvas.mpl_connect("pick_event", self.on_pick)
         self.figure.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.figure.canvas.mpl_connect("button_press_event", self.on_press)
         self.figure.canvas.mpl_connect("button_release_event", self.on_release)
@@ -323,9 +338,7 @@ class DynamicStrainArrivalPickerView(EventView):
         self.channel = min(self.channel, n - 1)
         self.fitting_markers = []
         self.not_fitting_markers = []
-        self.offset = [0, 0]
-        self.current_artist = None
-        self.currently_dragging = False
+        self._drag = None
         self.rupture_speed = None
         self.fitted_line = None
         self.plot()
@@ -520,8 +533,24 @@ class DynamicStrainArrivalPickerView(EventView):
             self.picked_idx = self.default_picks(strain, n_channels, y.shape[1])
         self.draw_markers()
 
+    def handle_extent(self, i: int) -> tuple:
+        """``(x_ms, y_low, y_high)`` of channel ``i``'s pick handle: the height
+        of its drawn trace, so that it never reaches a neighbouring trace."""
+        x = float(self.relative_time_s()[int(self.picked_idx[i])] * 1e3)
+        line = self.lines[i] if i < len(self.lines) else None
+        y = np.asarray(line.get_ydata(), dtype=float) if line is not None else np.array([])
+        y = y[np.isfinite(y)]
+        if y.size and np.ptp(y) > 0:
+            lo, hi = float(y.min()), float(y.max())
+        else:
+            half = 0.5 * self.trace_amplitude(self.locations)
+            lo, hi = self.locations[i] - half, self.locations[i]
+        inset = HANDLE_INSET_FRACTION * (hi - lo)
+        return x, lo + inset, hi - inset
+
     def draw_markers(self):
-        width, height = self.get_circle_dims()
+        """One handle per shown channel: red when fitted, black when not; the
+        selected channel's is wider."""
         for marker in self.fitting_markers + self.not_fitting_markers:
             try:
                 marker.remove()
@@ -529,38 +558,25 @@ class DynamicStrainArrivalPickerView(EventView):
                 pass
         self.fitting_markers = []
         self.not_fitting_markers = []
-        for i, idx in enumerate(self.picked_idx):
+        for i in range(len(self.picked_idx)):
             if not self.enabled_channels[i] or self.lines[i] is None:
                 continue
+            x, lo, hi = self.handle_extent(i)
             color = "red" if self.fitting_channels[i] else "black"
-            x, y = self.lines[i].get_data()
-            marker = patches.Ellipse((x[idx], y[idx]), width=width, height=height, color=color,
-                                     fill=False, lw=2, picker=8, label=str(i))
-            self.ax_wave.add_patch(marker)
+            marker = self.ax_wave.plot([x, x], [lo, hi], color=color, lw=3.5 if i == self.channel else 2.0,
+                                       solid_capstyle="butt", label=str(i), zorder=5)[0]
             if self.fitting_channels[i]:
                 self.fitting_markers.append(marker)
             else:
                 self.not_fitting_markers.append(marker)
         self.canvas.draw()
 
-    def get_circle_dims(self):
-        xl = self.ax_wave.get_xlim()
-        yl = self.ax_wave.get_ylim()
-        ratio = (yl[-1] - yl[0]) / (xl[-1] - xl[0])
-        bbox = self.ax_wave.get_window_extent()
-        ax_size = [bbox.width, bbox.height]
-        ratio *= ax_size[0] / ax_size[1]
-        width = (xl[-1] - xl[0]) / ax_size[0] * 0.1 * self.figure.dpi
-        return width, width * ratio
+    def marker_of(self, i: int):
+        return next((m for m in self.fitting_markers + self.not_fitting_markers if m.get_label() == str(i)), None)
 
     def on_resize(self, event=None):
         self.canvas.draw()
         if self.axs is not None:
-            width, height = self.get_circle_dims()
-            for marker in self.fitting_markers + self.not_fitting_markers:
-                marker.set_width(width)
-                marker.set_height(height)
-            self.canvas.draw()
             self.xlim = self.ax_wave.get_xlim()
 
     def zoom_to_picks(self) -> None:
@@ -581,49 +597,105 @@ class DynamicStrainArrivalPickerView(EventView):
         self.on_resize()
 
     # ------------------------------------------------------------- dragging
-    def on_pick(self, event):
-        if self.toolbar_active():
-            return
-        if self.current_artist is None and isinstance(event.artist, patches.Ellipse):
-            self.current_artist = event.artist
-            x0, y0 = self.current_artist.center
-            x1, y1 = event.mouseevent.xdata, event.mouseevent.ydata
-            if x1 is None or y1 is None:
-                self.offset = [0, 0]
-            else:
-                self.offset = [(x0 - x1), (y0 - y1)]
+    def handle_at(self, event) -> Optional[int]:
+        """The channel whose pick handle is within ``HANDLE_PX`` of a mouse event, or None."""
+        if event.inaxes is not self.ax_wave or event.x is None or event.y is None:
+            return None
+        best, best_dx = None, HANDLE_PX + 1.0
+        to_px = self.ax_wave.transData.transform
+        for marker in self.fitting_markers + self.not_fitting_markers:
+            i = int(marker.get_label())
+            x, lo, hi = self.handle_extent(i)
+            (px, py_lo), (_, py_hi) = to_px((x, lo)), to_px((x, hi))
+            dx = abs(event.x - px)
+            if dx < best_dx and min(py_lo, py_hi) - HANDLE_PX <= event.y <= max(py_lo, py_hi) + HANDLE_PX:
+                best, best_dx = i, dx
+        return best
+
+    def channel_near(self, event) -> Optional[int]:
+        """The shown channel whose trace line is nearest the event, within half a trace height."""
+        if event.inaxes is not self.ax_wave or event.ydata is None:
+            return None
+        shown = [i for i in range(len(self.picked_idx)) if self.lines[i] is not None]
+        if not shown:
+            return None
+        i = min(shown, key=lambda k: abs(self.locations[k] - event.ydata))
+        return i if abs(self.locations[i] - event.ydata) <= 0.5 * self.trace_amplitude(self.locations) else None
 
     def on_press(self, event):
-        if self.toolbar_active():
+        """Grab a pick handle; a press elsewhere on a trace selects its channel."""
+        if self.toolbar_active() or getattr(event, "button", 1) != 1:
             return
-        self.currently_dragging = True
-
-    def on_release(self, event):
-        self.current_artist = None
-        self.currently_dragging = False
-        self.on_resize()
+        i = self.handle_at(event)
+        if i is None:
+            i = self.channel_near(event)
+            if i is not None and i != self.channel:
+                self.select_channel(i)
+            return
+        self._drag = i
+        if i != self.channel:
+            self.select_channel(i)
 
     def on_motion(self, event):
-        if self.toolbar_active():
+        if self._drag is None or self.toolbar_active() or event.xdata is None:
             return
-        if not self.currently_dragging or self.current_artist is None:
+        self.set_pick(self._drag, self.sample_at(event.xdata), refit=True)
+
+    def on_release(self, event):
+        if self._drag is not None:
+            self._drag = None
+            self.update_fitted_line()
+        self.on_resize()
+
+    def sample_at(self, t_ms: float) -> int:
+        """The sample nearest a time in ms from the event."""
+        return int(np.argmin(np.abs(self.relative_time_s() * 1e3 - float(t_ms))))
+
+    def set_pick(self, i: int, idx: int, refit: bool = True) -> None:
+        """Put channel ``i``'s pick on sample ``idx`` and move its handle."""
+        idx = int(min(max(int(idx), 0), self.relative_time_s().size - 1))
+        self.picked_idx[i] = idx
+        marker = self.marker_of(i)
+        if marker is not None:
+            x, _, _ = self.handle_extent(i)
+            marker.set_xdata([x, x])
+        if refit:
+            self.update_fitted_line()
+
+    def on_arrival_typed(self, event=None) -> None:
+        """The selected channel's arrival typed in ms from the event."""
+        text = self.arrival_var.get().strip()
+        if not text:
             return
-        if event.xdata is None or event.ydata is None:
+        try:
+            t_ms = float(text)
+            if not math.isfinite(t_ms):
+                raise ValueError
+        except ValueError:
+            self.update_status(f"arrival: {text!r} is not a time in ms")
             return
-        if not isinstance(self.current_artist, patches.Ellipse):
+        tt = self.relative_time_s() * 1e3
+        if not tt[0] <= t_ms <= tt[-1]:
+            self.update_status(f"arrival: {t_ms:g} ms is outside the record ({tt[0]:.4g} to {tt[-1]:.4g} ms)")
             return
-        channel = int(self.current_artist.get_label())
-        dx, dy = self.offset
-        cx, cy = event.xdata + dx, event.ydata + dy
-        xl = self.ax_wave.get_xlim()
-        yl = self.ax_wave.get_ylim()
-        yw = yl[-1] - yl[0]
-        xw = xl[-1] - xl[0]
-        x, y = self.lines[channel].get_data()
-        idx = int(np.argmin(((x - cx) / xw) ** 2 + ((y - cy) / yw) ** 2))
-        self.current_artist.set_center((x[idx], y[idx]))
-        self.picked_idx[channel] = idx
-        self.update_fitted_line()
+        idx = self.sample_at(t_ms)
+        if idx != self.picked_idx[self.channel]:
+            self.set_pick(self.channel, idx)
+        else:
+            self.show_arrival()
+
+    def show_arrival(self) -> None:
+        """The selected channel's name and arrival in the row under the table."""
+        if self.picked_idx is None:
+            return
+        names = self.channel_names()
+        self.channel_label_var.set(names[self.channel] if self.channel < len(names) else f"ch {self.channel}")
+        t = self.relative_time_s()[int(self.picked_idx[self.channel])] * 1e3
+        self.arrival_var.set(_ms(float(t), 6))
+
+    def step_channel(self, step: int) -> None:
+        if self.picked_idx:
+            self.select_channel((self.channel + step) % len(self.picked_idx))
 
     # ------------------------------------------------------------------ fit
     @staticmethod
@@ -714,6 +786,7 @@ class DynamicStrainArrivalPickerView(EventView):
                 self.table.see(str(self.channel))
         finally:
             self._filling_table = False
+        self.show_arrival()
 
     def on_table_click(self, event) -> None:
         """A click on the show or fit cell toggles it."""
@@ -740,6 +813,8 @@ class DynamicStrainArrivalPickerView(EventView):
         for k, line in enumerate(self.lines):
             if line is not None:
                 line.set_linewidth(2.0 if k == self.channel else 1.0)
+        for marker in self.fitting_markers + self.not_fitting_markers:
+            marker.set_linewidth(3.5 if marker.get_label() == str(self.channel) else 2.0)
         self.canvas.draw_idle()
         self.fill_table()
 

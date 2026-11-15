@@ -88,7 +88,8 @@ def test_identical_picks_away_from_zero_report_na(view):
     target = 3 * len(t) // 4
     assert t[target] - view.event["event_time"] != 0
     _move_all_picks(view, target)
-    assert all(m.center[0] == pytest.approx((t[target] - view.event["event_time"]) * 1e3) for m in view.fitting_markers)
+    assert all(m.get_xdata()[0] == pytest.approx((t[target] - view.event["event_time"]) * 1e3)
+               for m in view.fitting_markers)
     assert np.isnan(view.rupture_speed)
     assert view.cf_label.cget("text") == "Cf = n/a"
     assert view.fitted_line is None
@@ -305,48 +306,101 @@ def test_filter_window_is_typed_in_ms(view):
     assert "(filter off)" in view.filter_note_var.get()
 
 
-class _FakeMouse:
-    def __init__(self, x, y):
-        self.xdata = x
-        self.ydata = y
+class _Mouse:
+    """A mouse event at data point ``(x_ms, y_mm)`` of the waveform panel."""
+
+    def __init__(self, view, x_ms, y_mm, button=1):
+        self.inaxes = view.ax_wave
+        self.xdata, self.ydata = x_ms, y_mm
+        self.x, self.y = view.ax_wave.transData.transform((x_ms, y_mm))
+        self.button = button
 
 
-class _FakePick:
-    def __init__(self, artist, x, y):
-        self.artist = artist
-        self.mouseevent = _FakeMouse(x, y)
+def test_drag_moves_a_pick_along_time_only_and_is_ignored_in_toolbar_mode(view):
+    view.canvas.draw()
+    channel = int(view.fitting_markers[0].get_label())
+    tt = view.relative_time_s() * 1e3
+    x0 = tt[view.picked_idx[channel]]
+    loc = view.locations[channel]
+    target = len(tt) // 4
 
-
-def test_drag_moves_pick_and_is_ignored_in_toolbar_mode(view):
-    marker = view.fitting_markers[0]
-    channel = int(marker.get_label())
-    x, y = view.lines[channel].get_data()
-    target = len(x) // 4
-    cx, cy = marker.center
-
-    # toolbar in pan/zoom: pick and press are ignored
+    # toolbar in pan/zoom: the press does not grab the handle
     view.toolbar.mode = "pan/zoom"
     try:
-        view.on_press(_FakeMouse(cx, cy))
-        view.on_pick(_FakePick(marker, cx, cy))
-        assert view.current_artist is None
-        assert not view.currently_dragging
-        view.on_motion(_FakeMouse(x[target], y[target]))
+        view.on_press(_Mouse(view, x0, loc))
+        assert view._drag is None
+        view.on_motion(_Mouse(view, tt[target], loc))
         assert view.picked_idx[channel] != target
     finally:
         view.toolbar.mode = ""
 
-    # normal mode: drag snaps the marker to the nearest sample
-    view.on_press(_FakeMouse(cx, cy))
-    view.on_pick(_FakePick(marker, cx, cy))
-    assert view.current_artist is marker
-    view.on_motion(_FakeMouse(x[target], y[target]))
+    # a press on the handle grabs it and selects the channel; the drag follows the time axis only
+    _, lo, hi = view.handle_extent(channel)
+    view.on_press(_Mouse(view, x0, 0.5 * (lo + hi)))
+    assert view._drag == channel and view.channel == channel
+    view.on_motion(_Mouse(view, tt[target], hi + 3.0))      # off the handle vertically: still this channel
     assert view.picked_idx[channel] == target
-    assert marker.center == pytest.approx((x[target], y[target]))
+    marker = view.marker_of(channel)
+    assert list(marker.get_xdata()) == pytest.approx([tt[target]] * 2)
     assert np.isfinite(view.rupture_speed)
     view.on_release(None)
-    assert view.current_artist is None
-    assert not view.currently_dragging
+    assert view._drag is None
+    assert view.table.item(str(channel), "values")[2] == f"{tt[target]:.5g}"
+    assert view.arrival_var.get() == f"{tt[target]:.6g}"
+
+    # a press away from every handle grabs nothing; near a trace it selects that channel
+    other = next(i for i, e in enumerate(view.enabled_channels) if e and i != channel)
+    view.on_press(_Mouse(view, tt[10], view.locations[other]))
+    assert view._drag is None and view.channel == other
+
+
+def test_real_mouse_drag_moves_a_pick(view):
+    view.deiconify()
+    view.update()
+    widget = view.canvas.get_tk_widget()
+    if not widget.winfo_ismapped():
+        pytest.skip("window not mapped: Tk mouse events need a display")
+    view.canvas.draw()
+    channel = int(view.fitting_markers[1].get_label())
+    tt = view.relative_time_s() * 1e3
+    target = len(tt) // 3
+    height = view.canvas.figure.bbox.height
+
+    def at(x_ms, y_mm):
+        px, py = view.ax_wave.transData.transform((x_ms, y_mm))
+        return int(round(px)), int(round(height - py))
+
+    _, lo, hi = view.handle_extent(channel)
+    x, y = at(tt[view.picked_idx[channel]], 0.5 * (lo + hi))
+    widget.event_generate("<ButtonPress-1>", x=x, y=y)
+    x2, y2 = at(tt[target], view.locations[channel])
+    widget.event_generate("<B1-Motion>", x=x2, y=y2)
+    widget.event_generate("<ButtonRelease-1>", x=x2, y=y2)
+    widget.update()
+    assert abs(view.picked_idx[channel] - target) <= max(2, int(len(tt) / widget.winfo_width()) + 1)
+
+
+def test_typed_arrival_and_channel_arrows(view):
+    tt = view.relative_time_s() * 1e3
+    view.select_channel(6)
+    assert view.channel_label_var.get() == "ch 6"
+    view.arrival_var.set(f"{tt[100]:.6f}")
+    view.on_arrival_typed()
+    assert view.picked_idx[6] == 100
+    assert list(view.marker_of(6).get_xdata()) == pytest.approx([tt[100]] * 2)
+    # outside the record or not a number: the pick stays, the status says why
+    view.arrival_var.set("1e6")
+    view.on_arrival_typed()
+    assert view.picked_idx[6] == 100 and "outside the record" in view.status_var.get()
+    view.arrival_var.set("abc")
+    view.on_arrival_typed()
+    assert view.picked_idx[6] == 100 and "not a time in ms" in view.status_var.get()
+    # the arrows step through every channel and wrap around
+    view.step_channel(+1)
+    assert view.channel == 7 and view.channel_label_var.get() == "ch 7"
+    view.select_channel(0)
+    view.step_channel(-1)
+    assert view.channel == N_CHANNELS - 1
 
 
 def test_close_unregisters(app_with_strain):
