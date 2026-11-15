@@ -35,7 +35,8 @@ the record allows:
   far from the asperity.  When the rate has not fallen that far by
   ``t_i + max_decay_s`` (or there is no positive background rate) the window
   starts there, a provisional choice, and the sensor is flagged for a check
-  by hand.
+  by hand.  A decay window that would run past the next event or the end of
+  the record is moved earlier, to the latest start that fits, and flagged.
 
 A sensor whose background rate is more than ``creep_ratio`` of its slip rate
 at ``t_i`` creeps nearly as fast before the event as it slips during it: its
@@ -48,8 +49,6 @@ not slip backwards in an event, so it marks windows the trace does not suit.
 Times are relative to the event time, as ``fit_before_s`` / ``fit_after_s``
 are in a ``slip_analysis`` record.  The defaults were set against windows
 placed by hand in experiment t0234 (runs 0 to 2, 352 sensors).
-
-Added by ChenYing (branch slip-auto-windows) for review by the project owner.
 """
 from __future__ import annotations
 
@@ -88,6 +87,7 @@ FLAG_NO_BACKGROUND = "auto: no background slip rate, check the after window"
 FLAG_CREEP = "auto: creep close to the coseismic rate, check the windows"
 FLAG_NEGATIVE = "auto: negative slip, check the windows"   # set by the caller from the slip measured
 FLAG_NO_ROOM_AFTER = "auto: no room for the after window"
+FLAG_AFTER_MOVED = "auto: after window moved earlier to fit, check the after window"
 FLAG_NO_ONSET = "auto: no onset found"
 FLAG_BEFORE_SHORT = "auto: before window shortened"
 FLAG_NO_ROOM_BEFORE = "auto: no room for the before window"
@@ -212,6 +212,7 @@ def choose_after(time, values, rate_row, t_i: float, background_rate: float, *, 
     a = float(max_decay_s) if a is None else max(a, float(min_after_s))
     if a + width_s > limit_s + 1e-9:
         a = float(starts[-1])                # the latest window that still ends before the limit
+        flags.append(FLAG_AFTER_MOVED)
     return a, KIND_DECAY, flags
 
 
@@ -309,6 +310,7 @@ __all__ = [
     "DEFAULT_RATE_SMOOTHING_S", "DEFAULT_MIN_AFTER_S", "DEFAULT_MAX_DECAY_S", "DEFAULT_CREEP_RATIO",
     "DEFAULT_ONSET_FRACTION", "DEFAULT_BEFORE_GAP_S", "DEFAULT_ONSET_SEARCH_S", "DEFAULT_EVENT_MARGIN_S",
     "MIN_WIDTH_FRACTION", "FLAG_NO_DECAY", "FLAG_NO_BACKGROUND", "FLAG_CREEP", "FLAG_NEGATIVE", "FLAG_NO_ROOM_AFTER",
+    "FLAG_AFTER_MOVED",
     "FLAG_NO_ONSET", "FLAG_BEFORE_SHORT", "FLAG_NO_ROOM_BEFORE", "FLAG_NO_RATE", "AutoWindows",
     "after_line_values", "plateau_start",
     "settle_time", "choose_before", "choose_after", "auto_windows",

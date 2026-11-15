@@ -105,6 +105,16 @@ def test_windows_stay_clear_of_neighbouring_events():
     assert w.before is None and fw.FLAG_NO_ROOM_BEFORE in w.flags
 
 
+def test_an_after_window_moved_earlier_by_the_next_event_is_flagged():
+    # afterslip without a plateau settles near t_i + 0.5 s; the next event leaves room only up to 0.95 s
+    t, data, rate, shifts = make([dict(step_um=20.0, afterslip_um=5.0, afterslip_tc_s=0.1, rise_s=0.1)])
+    (free,) = fw.auto_windows(t, data, EVENT_TIME, shifts, rate)
+    assert free.kind == fw.KIND_DECAY and fw.FLAG_AFTER_MOVED not in free.flags
+    (w,) = fw.auto_windows(t, data, EVENT_TIME, shifts, rate, next_event_s=1.05)
+    assert w.kind == fw.KIND_DECAY and fw.FLAG_AFTER_MOVED in w.flags
+    assert w.after[0] < free.after[0] and w.after[1] <= 1.05 - fw.DEFAULT_EVENT_MARGIN_S + 1e-9
+
+
 def test_creep_close_to_the_coseismic_rate_is_flagged():
     t, data, rate, shifts = make([dict(step_um=60.0), dict(step_um=2.0, load_um_s=10.0, rise_s=0.1)])
     sharp, creeping = fw.auto_windows(t, data, EVENT_TIME, shifts, rate)
