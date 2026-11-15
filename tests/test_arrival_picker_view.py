@@ -50,8 +50,13 @@ def test_open_and_defaults(app_with_strain, view):
     assert sum(line is not None for line in view.lines) == 8
     assert len(view.fitting_markers) == 4
     assert len(view.not_fitting_markers) == 4
-    assert len(view.enabled_channels_mb.items) == N_CHANNELS
-    assert [v.get() for v in view.fitting_channels_mb.items] == [int(f) for f in OLD_LAYOUT_FITTING]
+    # one table row per channel; show and fit as check marks
+    rows = [view.table.item(r, "values") for r in view.table.get_children()]
+    assert len(rows) == N_CHANNELS
+    assert [r[3] == "\u2713" for r in rows] == OLD_LAYOUT_ENABLED
+    assert [r[4] == "\u2713" for r in rows] == OLD_LAYOUT_FITTING
+    assert view.ax_wave is view.axs[4] and view.ax_wave.get_xlabel() == "time from the event (ms)"
+    assert "not saved" in view.status_var.get()
 
 
 def test_from_context(app_with_strain):
@@ -83,7 +88,7 @@ def test_identical_picks_away_from_zero_report_na(view):
     target = 3 * len(t) // 4
     assert t[target] - view.event["event_time"] != 0
     _move_all_picks(view, target)
-    assert all(m.center[0] == pytest.approx(t[target] - view.event["event_time"]) for m in view.fitting_markers)
+    assert all(m.center[0] == pytest.approx((t[target] - view.event["event_time"]) * 1e3) for m in view.fitting_markers)
     assert np.isnan(view.rupture_speed)
     assert view.cf_label.cget("text") == "Cf = n/a"
     assert view.fitted_line is None
@@ -173,8 +178,7 @@ def test_magic_then_save(app_with_strain, view):
 
 def test_switch_event_reloads_channel_state(app_with_strain, view):
     view.magic()
-    view.fitting_channels_mb.items[0].set(1)
-    view.fitting_channels_changed()
+    view.set_fitting(0, True)
     assert view.fitting_channels[0] is True
     assert len(view.fitting_markers) == 5
     view.save()
@@ -198,7 +202,8 @@ def test_switch_event_reloads_channel_state(app_with_strain, view):
     view.set_event(1)
     assert view.picked_idx == saved_picks
     assert view.fitting_channels == saved_fitting
-    assert [v.get() for v in view.fitting_channels_mb.items] == [int(f) for f in saved_fitting]
+    assert [view.table.item(str(i), "values")[4] == "\u2713" for i in range(N_CHANNELS)] == saved_fitting
+    assert view.status_var.get().endswith("saved")
     assert view.rupture_speed == pytest.approx(saved_speed)
 
 
@@ -217,14 +222,14 @@ def test_switch_to_event_without_strain_is_refused(app_with_strain, view, no_dia
     assert view.event_combobox.get() == "1"
     assert view.picked_idx == picks
     assert view.rupture_speed == pytest.approx(speed)
-    assert len(no_dialogs) == 1 and no_dialogs[0][0] == "No waveform record"
+    assert no_dialogs == [] and "event 2 has no full-rate record" in view.status_var.get()
 
     # the same through the combobox: it snaps back to the current event
     view.event_combobox.set("2")
     view.on_event_selected()
     assert view.event_idx == 1
     assert view.event_combobox.get() == "1"
-    assert len(no_dialogs) == 2
+    assert no_dialogs == []
 
     # the view is still fully usable
     view.save()
@@ -246,9 +251,9 @@ def test_open_on_event_without_strain_raises_and_unregisters(app_with_strain):
 
 def test_unsaved_channel_edits_do_not_leak_into_data(app_with_strain, view):
     view.save()
-    view.enabled_channels_mb.items[1].set(1)
-    view.enabled_channels_changed()
+    view.set_shown(1, True)
     assert view.enabled_channels[1] is True
+    assert view.status_var.get().endswith("differs from the saved record")
     assert len(view.not_fitting_markers) == 5
     assert app_with_strain.data_manager.get_data("runs/[0]/events/[1]/strain/enabled_channels")[1] is False
 
@@ -257,51 +262,47 @@ def test_filter_toggle_keeps_picks(view):
     view.magic()
     picks = list(view.picked_idx)
     view.toggle_filter()
-    assert view.filtering
-    assert view.filter_toggle.cget("text") == "Filter On"
+    assert view.filtering and view.filter_var.get() is True
     assert view.picked_idx == picks
     assert np.isfinite(view.rupture_speed)
     view.toggle_filter()
-    assert not view.filtering
-    assert view.filter_toggle.cget("text") == "Filter Off"
+    assert not view.filtering and view.filter_var.get() is False
 
 
-def test_filter_window_is_used_as_typed(view):
+def test_filter_window_is_typed_in_ms(view):
     from scipy import signal
 
     raw = view.event["strain"]["original"]["raw"]
+    t = view.event["strain"]["original"]["time"]
+    dt = float(np.median(np.diff(t)))
     channel = next(i for i, f in enumerate(view.fitting_channels) if f)
 
-    # an even window is used as typed: the spinbox keeps showing it
-    view.filter_window_length.set("50")
+    # the record opens with a window of 51 samples, shown in ms
+    assert view.filter_window() == 51
+    assert float(view.filter_window_ms.get()) == pytest.approx(51 * dt * 1e3, rel=1e-2)
+    # a window typed in ms is turned into samples
+    view.filter_window_ms.set(f"{50 * dt * 1e3:.6g}")
     view.toggle_filter()
-    assert view.filter_window() == 50
-    assert view.filter_window_length.get() == "50"
+    assert view.filter_window() == 50 and "= 50 samples" in view.filter_note_var.get()
     x, y = view.lines[channel].get_data()
     filtered = signal.savgol_filter(raw[channel], 50, 2)
     span = filtered.max() - filtered.min()
-    expected = filtered * (-12 / span) + view.locations[channel]
-    np.testing.assert_allclose(y, expected)
+    np.testing.assert_allclose(y, filtered * (-12 / span) + view.locations[channel])
 
-    # a value savgol cannot use is clamped, and the widget shows what was applied
-    view.filter_window_length.set("1")
-    view.on_filter_window_length_box_changed()
+    # a window savgol cannot use is clamped; garbage falls back to 51 samples
+    view.filter_window_ms.set(f"{dt * 1e3:.6g}")
+    view.on_filter_window_changed()
     assert view.filter_window() == 3
-    assert view.filter_window_length.get() == "3"
+    view.filter_window_ms.set("abc")
+    view.on_filter_window_changed()
+    assert view.filter_window() == 51
 
-    # garbage falls back to the default; the widget is corrected while filtering
-    view.filter_window_length.set("abc")
-    view.on_filter_window_length_box_changed()
-    assert view.filter_window_length.get() == "51"
-
-    # with the filter off the spinbox is left alone
+    # with the filter off the traces are the raw ones
     view.toggle_filter()
-    view.filter_window_length.set("50")
-    view.on_filter_window_length_box_changed()
-    assert view.filter_window_length.get() == "50"
     x, y = view.lines[channel].get_data()
     span = raw[channel].max() - raw[channel].min()
     np.testing.assert_allclose(y, raw[channel] * (-12 / span) + view.locations[channel])
+    assert "(filter off)" in view.filter_note_var.get()
 
 
 class _FakeMouse:
@@ -463,3 +464,86 @@ def test_czm_and_pzt_view_read_the_record_arrivals(app):
         assert pv.window.trigger_time == pytest.approx(time[arrivals["picked_idx"][2]])
     finally:
         pv.on_close()
+
+
+# ------------------------------------------------------------ left column
+def test_a_click_on_the_show_or_fit_cell_toggles_it(view):
+    view.deiconify()
+    view.update()
+    if not view.table.winfo_ismapped():
+        pytest.skip("window not mapped")
+    view.table.see("6")
+    view.update()
+
+    def click(row, column):
+        x, y, w, h = view.table.bbox(row, column)
+        view.table.event_generate("<ButtonPress-1>", x=x + w // 2, y=y + h // 2)
+        view.table.event_generate("<ButtonRelease-1>", x=x + w // 2, y=y + h // 2)
+        view.update()
+
+    assert view.fitting_channels[6] is True
+    click("6", "fit")
+    assert view.fitting_channels[6] is False and len(view.fitting_markers) == 3
+    assert view.table.item("6", "values")[4] == ""
+    assert view.enabled_channels[1] is False
+    view.table.see("1")
+    view.update()
+    click("1", "show")
+    assert view.enabled_channels[1] is True and view.lines[1] is not None
+    # a click elsewhere on a row selects the channel, its trace drawn thicker
+    view.table.see("4")
+    view.update()
+    click("4", "channel")
+    assert view.channel == 4 and view.lines[4].get_linewidth() == 2.0 and view.lines[0].get_linewidth() == 1.0
+
+
+def test_show_all_and_fit_all_shown(view):
+    view.set_all_shown(True)
+    assert all(view.enabled_channels) and all(line is not None for line in view.lines)
+    view.fit_all_shown()
+    assert all(view.fitting_channels) and len(view.fitting_markers) == N_CHANNELS
+
+
+def test_event_arrows_skip_events_without_a_record(app_with_strain, view):
+    app_with_strain.data_manager.get_data("runs/[0]/events/[2]").pop("strain")
+    view.step_event(+1)
+    assert view.event_idx == 3                              # event 2 has no record
+    view.step_event(-1)
+    assert view.event_idx == 1
+    view.set_event(0)
+    view.step_event(-1)
+    assert view.event_idx == 0 and "no earlier event" in view.status_var.get()
+
+
+def test_zoom_to_picks_and_whole_record(view):
+    tt = view.relative_time_s() * 1e3
+    view.zoom_to_picks()                                   # every pick on one sample: a narrow window around it
+    lo, hi = view.ax_wave.get_xlim()
+    t0 = tt[view.picked_idx[0]]
+    assert lo < t0 < hi and hi - lo == pytest.approx(0.04 * (tt[-1] - tt[0]))
+    view.magic()
+    view.zoom_to_picks()
+    lo, hi = view.ax_wave.get_xlim()
+    times = [tt[view.picked_idx[i]] for i, e in enumerate(view.enabled_channels) if e]
+    assert lo <= min(times) and hi >= max(times)
+    assert lo >= tt[0] and hi <= tt[-1]                    # never wider than the record
+    view.show_whole_record()
+    assert view.ax_wave.get_xlim() == pytest.approx((tt[0], tt[-1]))
+
+
+def test_mechanical_traces_can_be_hidden(app_with_strain, view):
+    try:
+        view.magic()
+        picks = list(view.picked_idx)
+        view.mechanical_var.set(False)
+        view.on_mechanical_toggled()
+        assert len(view.axs) == 1 and view.ax_wave is view.axs[0]
+        assert view.picked_idx == picks and np.isfinite(view.rupture_speed)
+        # the choice carries over to the next window opened
+        other = DynamicStrainArrivalPickerView(app_with_strain, 0, 2)
+        try:
+            assert other.mechanical_var.get() is False and len(other.axs) == 1
+        finally:
+            other.on_close()
+    finally:
+        DynamicStrainArrivalPickerView.show_mechanical_default = True

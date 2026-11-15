@@ -1,9 +1,17 @@
 """Pick rupture-front arrival times on one full-rate record of an event.
 
-The figure stacks the four mechanical traces above the record's waveforms
-(strain gauges or PZTs), each drawn at its sensor position along the fault.
-One draggable marker per enabled channel marks the arrival; a straight line
-through the markers of the *fitting* channels gives the rupture speed ``Cf``.
+The figure stacks the four mechanical traces (which can be hidden) above the
+record's waveforms (strain gauges or PZTs), each drawn at its sensor position
+along the fault, on a time axis in ms from the event time.  One draggable
+marker per shown channel marks the arrival; a straight line through the
+markers of the *fitting* channels gives the rupture speed ``Cf``.
+
+The controls sit in a scrolling column on the left: the event and the record,
+a table of the channels (name, position, arrival, whether it is shown and
+whether it is fitted; a click on the show or fit cell toggles it, a click on
+the row selects the channel), the view (mechanical traces, zoom), the trace
+filter, Save and a status line that says whether the picks differ from the
+saved ones.
 
 A Record selector chooses which record is picked on, and the results belong
 to that record (``read_arrivals``/``write_arrivals`` in
@@ -12,14 +20,16 @@ holds ``picked_idx``, ``arrival_time``, ``enabled_channels``,
 ``fitting_channels``, ``locations`` and ``rupture_speed`` (absent when the
 picks define no line), so strain and PZT picks never overwrite each other.
 The PSU ``strain`` layout keeps its historical keys (``strain/original/picked_idx``,
-``event['rupture_speed']``, ...).
+``event['rupture_speed']``, ...).  ``rupture_speed`` keeps the sign of the
+published analyses, ``-1 / slope`` of ``time = slope * location``.
 """
 from __future__ import annotations
 
 import math
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 import warnings
+from typing import Optional
 
 import matplotlib.patches as patches
 import numpy as np
@@ -28,9 +38,11 @@ from scipy import signal
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
+from labquake_explorer.ui.views.scroll_panel import ScrollPanel
 from labquake_explorer.data.channels import aligned_fields, get_field
 from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
-                                            waveform_data, waveform_time, waveform_trigger_time, write_arrivals)
+                                            waveform_channels, waveform_data, waveform_time, waveform_trigger_time,
+                                            write_arrivals)
 
 # Experiments from this number on use the 16-channel layout with three
 # extra gauges at the ends of the fault; older ones use paired gauges.
@@ -39,15 +51,28 @@ NEW_LAYOUT_EXP_NUMBER = 5958
 # Savitzky-Golay polynomial order; the window must be longer than this.
 FILTER_POLYORDER = 2
 MIN_FILTER_WINDOW = FILTER_POLYORDER + 1
-DEFAULT_FILTER_WINDOW = 51
+DEFAULT_FILTER_WINDOW = 51            # samples: the window a record opens with, shown in ms
 DEFAULT_TRACE_AMPLITUDE_MM = 12.0     # trace amplitude when the sensor spacing is unknown
+ZOOM_MARGIN_FRACTION = 0.5            # "Zoom to picks": this share of the picks' spread on each side ...
+ZOOM_MIN_HALFWIDTH_FRACTION = 0.02    # ... and at least this share of the record
+TEXT_WRAP_PX = 280
+CHECK = "✓"
+TABLE_COLUMNS = (("channel", 70), ("x (mm)", 60), ("arrival (ms)", 85), ("show", 42), ("fit", 36))
+MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
+              ("LP_displacement", r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$"), ("slip", r"$\delta\ \mathrm{({\mu}m)}$"))
 
 _RankWarning = getattr(np, "exceptions", np).RankWarning
+
+
+def _ms(value: float, digits: int = 4) -> str:
+    return f"{value:.{digits}g}" if value is not None and math.isfinite(value) else ""
 
 
 @register_view("Pick Arrivals", kinds=[EVENT], order=20)
 class DynamicStrainArrivalPickerView(EventView):
     window_title = "Pick Arrivals"
+    #: whether the mechanical traces are shown; a change applies to the windows opened after it
+    show_mechanical_default = True
 
     def __init__(self, app, run_idx, event_idx):
         self.enabled_channels = None
@@ -55,6 +80,7 @@ class DynamicStrainArrivalPickerView(EventView):
         self.picked_idx = None
         self.lines = []
         self.axs = None
+        self.ax_wave = None
         self.fitting_markers = []
         self.not_fitting_markers = []
         self.offset = [0, 0]
@@ -66,57 +92,105 @@ class DynamicStrainArrivalPickerView(EventView):
         self.xlim = None
         self.record_key = None
         self.locations = []
+        self.channel = 0                    # the channel selected in the table
+        self.saved_state = None             # (picks, shown, fitting) as saved for this record, or None
+        self._filter_window_ms_default = None
+        self._filling_table = False
         super().__init__(app, run_idx, event_idx)
 
     # ------------------------------------------------------------------ ui
     def build_ui(self):
-        # 9 columns, 4 rows: controls / figure / toolbar / filter row
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(6, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.left_panel = ScrollPanel(self)
+        self.left_panel.grid(row=0, column=0, padx=5, pady=5, sticky="nsw")
+        left = self.left_panel.inner
 
-        self.build_event_selector(self, row=0, column=0)
-        ttk.Label(self, text="Record:").grid(row=0, column=2, padx=(10, 2), pady=5, sticky="e")
-        self.record_combobox = ttk.Combobox(self, width=16, state="readonly")
-        self.record_combobox.grid(row=0, column=3, padx=(0, 5), pady=5, sticky="w")
+        frame = ttk.LabelFrame(left, text="Event")
+        frame.pack(fill="x", pady=(0, 4))
+        self.build_event_selector(frame, row=0, column=0)
+        arrows = ttk.Frame(frame)
+        arrows.grid(row=0, column=2, padx=2, sticky="w")
+        self.prev_event_button = ttk.Button(arrows, text="◀", width=2, command=lambda: self.step_event(-1))
+        self.prev_event_button.pack(side="left")
+        self.next_event_button = ttk.Button(arrows, text="▶", width=2, command=lambda: self.step_event(+1))
+        self.next_event_button.pack(side="left")
+        ttk.Label(frame, text="Record:").grid(row=1, column=0, padx=5, pady=2, sticky="w")
+        self.record_combobox = ttk.Combobox(frame, width=16, state="readonly")
+        self.record_combobox.grid(row=1, column=1, columnspan=2, padx=5, pady=2, sticky="w")
         self.record_combobox.bind("<<ComboboxSelected>>", self.on_record_selected)
 
-        self.enabled_channels_mb = tk.Menubutton(self, text="Enabled Channels")
-        self.enabled_channels_mb.grid(row=0, column=4, padx=5, pady=5)
-        self.enabled_channels_mb.menu = tk.Menu(self.enabled_channels_mb, tearoff=0)
-        self.enabled_channels_mb["menu"] = self.enabled_channels_mb.menu
-        self.enabled_channels_mb.items = []
+        frame = ttk.LabelFrame(left, text="Channels")
+        frame.pack(fill="x", pady=4)
+        ttk.Label(frame, text="click show or fit to toggle it; a row selects the channel",
+                  foreground="#606060", wraplength=TEXT_WRAP_PX, justify="left").grid(
+            row=0, column=0, columnspan=2, padx=4, sticky="w")
+        self.table = ttk.Treeview(frame, columns=[c for c, _ in TABLE_COLUMNS], show="headings", height=10,
+                                  selectmode="browse")
+        for name, width in TABLE_COLUMNS:
+            self.table.heading(name, text=name)
+            self.table.column(name, width=width, minwidth=width, anchor="center", stretch=False)
+        self.table.grid(row=1, column=0, padx=(4, 0), pady=2, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
+        scroll.grid(row=1, column=1, padx=(0, 4), pady=2, sticky="ns")
+        self.table.configure(yscrollcommand=scroll.set)
+        self.table.bind("<ButtonRelease-1>", self.on_table_click, add="+")
+        self.table.bind("<<TreeviewSelect>>", self.on_table_select, add="+")
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, columnspan=2, padx=2, pady=2, sticky="w")
+        ttk.Button(buttons, text="Show all", command=lambda: self.set_all_shown(True)).pack(side="left", padx=2)
+        ttk.Button(buttons, text="Fit all shown", command=self.fit_all_shown).pack(side="left", padx=2)
 
-        self.fitting_channels_mb = tk.Menubutton(self, text="Fitting Channels")
-        self.fitting_channels_mb.grid(row=0, column=5, padx=5, pady=5)
-        self.fitting_channels_mb.menu = tk.Menu(self.fitting_channels_mb, tearoff=0)
-        self.fitting_channels_mb["menu"] = self.fitting_channels_mb.menu
-        self.fitting_channels_mb.items = []
+        frame = ttk.LabelFrame(left, text="View")
+        frame.pack(fill="x", pady=4)
+        self.mechanical_var = tk.BooleanVar(master=self, value=type(self).show_mechanical_default)
+        ttk.Checkbutton(frame, text="mechanical traces (stress, friction, slip)", variable=self.mechanical_var,
+                        command=self.on_mechanical_toggled).grid(row=0, column=0, columnspan=2, padx=4, sticky="w")
+        ttk.Button(frame, text="Zoom to picks", command=self.zoom_to_picks).grid(row=1, column=0, padx=4, pady=2,
+                                                                              sticky="w")
+        ttk.Button(frame, text="Whole record", command=self.show_whole_record).grid(row=1, column=1, padx=4,
+                                                                                  pady=2, sticky="w")
 
-        self.cf_label = ttk.Label(self, text="Cf = n/a")
-        self.cf_label.grid(row=0, column=6, padx=5, pady=5, sticky="e")
-        self.magic_button = tk.Button(self, text="Magic", command=self.magic)
-        self.magic_button.grid(row=0, column=7, padx=5, pady=5, sticky="e")
-        self.save_button = tk.Button(self, text="Save", command=self.save)
-        self.save_button.grid(row=0, column=8, padx=5, pady=5, sticky="e")
+        frame = ttk.LabelFrame(left, text="Trace filter")
+        frame.pack(fill="x", pady=4)
+        self.filter_var = tk.BooleanVar(master=self, value=False)
+        ttk.Checkbutton(frame, text="Savitzky-Golay (order 2)", variable=self.filter_var,
+                        command=self.on_filter_toggled).grid(row=0, column=0, columnspan=2, padx=4, sticky="w")
+        ttk.Label(frame, text="Window (ms):").grid(row=1, column=0, padx=4, pady=2, sticky="e")
+        self.filter_window_ms = tk.StringVar(master=self, value="")
+        self.filter_window_entry = ttk.Entry(frame, textvariable=self.filter_window_ms, width=9)
+        self.filter_window_entry.grid(row=1, column=1, padx=4, pady=2, sticky="w")
+        for sequence in ("<Return>", "<FocusOut>"):
+            self.filter_window_entry.bind(sequence, self.on_filter_window_changed, add="+")
+        self.filter_note_var = tk.StringVar(master=self, value="")
+        ttk.Label(frame, textvariable=self.filter_note_var, foreground="#606060").grid(
+            row=2, column=0, columnspan=2, padx=4, sticky="w")
 
-        # figure (row 1) and toolbar (row 2)
-        self.make_figure(figsize=(7, 7), row=1, column=0, columnspan=9, padx=5, pady=5, sticky="nsew")
-        self.figure.set_layout_engine("constrained")
+        frame = ttk.LabelFrame(left, text="Rupture speed")
+        frame.pack(fill="x", pady=4)
+        self.cf_label = ttk.Label(frame, text="Cf = n/a")
+        self.cf_label.grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        ttk.Label(frame, text="one line through the fitted picks; Cf = -1 / slope", foreground="#606060",
+                  wraplength=TEXT_WRAP_PX, justify="left").grid(row=1, column=0, padx=4, sticky="w")
+        ttk.Button(frame, text="Magic (largest value of each trace)", command=self.magic).grid(
+            row=2, column=0, padx=4, pady=2, sticky="w")
+
+        frame = ttk.Frame(left)
+        frame.pack(fill="x", pady=4)
+        self.save_button = ttk.Button(frame, text="Save", command=self.save)
+        self.save_button.grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        self.status_var = tk.StringVar(master=self, value="")
+        ttk.Label(left, textvariable=self.status_var, wraplength=TEXT_WRAP_PX, foreground="#a03030",
+                  justify="left").pack(fill="x", pady=2)
+        self.left_panel.bind_children()
+
+        figure_frame = ttk.Frame(self)
+        figure_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+        figure_frame.grid_rowconfigure(0, weight=1)
+        figure_frame.grid_columnconfigure(0, weight=1)
+        self.make_figure(master=figure_frame, figsize=(7, 7), figure_kwargs={"layout": "constrained"},
+                         row=0, column=0, sticky="nsew")
         self.fig = self.figure  # legacy alias
-
-        # filter row
-        ttk.Label(self, text="Filter:", justify="left").grid(row=3, column=0, padx=5, pady=5, sticky="ew")
-        self.filter_combobox = ttk.Combobox(self, state="disabled")
-        self.filter_combobox.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
-        self.filter_combobox["values"] = ("scipy.savgol_filter",)
-        self.filter_combobox.current(0)
-        ttk.Label(self, text="Window length", justify="right").grid(row=3, column=2, padx=5, pady=5, sticky="w")
-        self.filter_window_length = tk.StringVar(value=str(DEFAULT_FILTER_WINDOW))
-        self.filter_window_length_box = ttk.Spinbox(self, from_=MIN_FILTER_WINDOW, to=201, increment=2,
-                                                    textvariable=self.filter_window_length)
-        self.filter_window_length_box.grid(row=3, column=3, padx=5, pady=5, sticky="ew")
-        self.filter_toggle = tk.Button(self, text="Filter Off", relief="raised", command=self.toggle_filter)
-        self.filter_toggle.grid(row=3, column=4, padx=5, pady=5, sticky="ew")
 
         self.figure.canvas.mpl_connect("pick_event", self.on_pick)
         self.figure.canvas.mpl_connect("motion_notify_event", self.on_motion)
@@ -124,7 +198,6 @@ class DynamicStrainArrivalPickerView(EventView):
         self.figure.canvas.mpl_connect("button_release_event", self.on_release)
         self.figure.canvas.mpl_connect("resize_event", self.on_resize)
         self.figure.canvas.mpl_connect("scroll_event", self.on_resize)
-        self.filter_window_length_box.bind("<ButtonRelease>", self.on_filter_window_length_box_changed)
 
     # ------------------------------------------------------------- loading
     def exp_number(self) -> int:
@@ -179,28 +252,37 @@ class DynamicStrainArrivalPickerView(EventView):
         xs = [float(v) for v in xs]
         return xs if all(math.isfinite(v) for v in xs) else None
 
+    def event_has_record(self, event_idx: int) -> bool:
+        try:
+            candidate = self.data_manager.get_data(f"{self.run_path}/events/[{int(event_idx)}]")
+        except (KeyError, IndexError, TypeError):
+            return False
+        return self.strain_block(candidate) is not None
+
     def set_event(self, event_idx: int) -> None:
-        """Switch events, but refuse (with a warning) an event without strain data.
+        """Switch events, but refuse (in the status line) an event without a record.
 
         The check happens before ``EventView.set_event`` touches ``event_idx``,
         ``event``, the title or the combobox, so a refused switch leaves the
         view exactly as it was.
         """
         event_idx = int(event_idx)
-        try:
-            candidate = self.data_manager.get_data(f"{self.run_path}/events/[{event_idx}]")
-        except (KeyError, IndexError, TypeError):
-            candidate = None
-        if self.strain_block(candidate) is None:
+        if not self.event_has_record(event_idx):
             self.refresh_event_selector()  # combobox may already show the refused index
-            messagebox.showwarning(
-                "No waveform record",
-                f"Event {event_idx} has no full-rate record to pick arrivals on; "
-                f"staying on event {self.event_idx}.",
-                parent=self,
-            )
+            self.status_var.set(f"event {event_idx} has no full-rate record to pick arrivals on; "
+                                f"staying on event {self.event_idx}")
             return
         super().set_event(event_idx)
+
+    def step_event(self, step: int) -> None:
+        """The previous / next event that has a full-rate record."""
+        k = self.event_idx + step
+        while 0 <= k < self.n_events():
+            if self.event_has_record(k):
+                self.set_event(k)
+                return
+            k += step
+        self.status_var.set(f"no {'earlier' if step < 0 else 'later'} event with a full-rate record")
 
     def on_event_loaded(self):
         keys = list(waveform_blocks(self.event)) if isinstance(self.event, dict) else []
@@ -233,8 +315,12 @@ class DynamicStrainArrivalPickerView(EventView):
             self.locations = [float(v) for v in locations]
         else:
             self.locations = self.block_locations(block, n) or self.default_locations(n, self.exp_number())
+        if self._filter_window_ms_default is None or self.filter_window_ms.get() == "":
+            self._set_default_filter_window()
 
+        self.table.configure(height=min(max(n, 4), 10))     # a row per channel, scrolling past ten
         self.xlim = None
+        self.channel = min(self.channel, n - 1)
         self.fitting_markers = []
         self.not_fitting_markers = []
         self.offset = [0, 0]
@@ -243,8 +329,7 @@ class DynamicStrainArrivalPickerView(EventView):
         self.rupture_speed = None
         self.fitted_line = None
         self.plot()
-        self.init_enabled_channels_mb()
-        self.init_fitting_channels_mb()
+        self.saved_state = self.current_state() if self.picked_idx is not None and picks is not None else None
         self.update_fitted_line()
 
     # ------------------------------------------------------------ defaults
@@ -296,15 +381,70 @@ class DynamicStrainArrivalPickerView(EventView):
             return (locs + [locs[-1]] * n_channels)[:n_channels]
         return [10.5 + 12 * (i // 2) for i in range(n_channels)]
 
-    # ---------------------------------------------------------------- plot
+    def channel_names(self) -> list:
+        """The record's channel names (``pzt_1``, ...), else ``ch 0``, ``ch 1``, ..."""
+        block = self.current_block()
+        names = waveform_channels(block) if block is not None else []
+        return [f"ch {n}" if str(n).isdigit() else str(n) for n in names]
+
+    def sample_interval(self) -> float:
+        t = waveform_time(self.current_block())
+        return float(np.median(np.diff(t[: min(t.size, 2000)]))) if t.size > 1 else 1.0
+
+    def relative_time_s(self) -> np.ndarray:
+        """The record's time axis in s from the event time."""
+        return waveform_time(self.current_block()) - float(self.event["event_time"])
+
+    def pick_times_s(self) -> list:
+        """Every channel's pick in s from the event time."""
+        t = self.relative_time_s()
+        return [float(t[int(i)]) for i in self.picked_idx]
+
+    # -------------------------------------------------------------- filter
+    def _set_default_filter_window(self) -> None:
+        ms = DEFAULT_FILTER_WINDOW * self.sample_interval() * 1e3
+        self._filter_window_ms_default = float(f"{ms:.3g}")
+        self.filter_window_ms.set(f"{self._filter_window_ms_default:g}")
+
     def filter_window(self) -> int:
-        """Savgol window length from the spinbox, as typed (even values are
-        fine for scipy's savgol_filter); clamped to > polyorder, 51 if unparsable."""
+        """Savgol window in samples from the window typed in ms; at least
+        polyorder + 1, the record's default (51 samples) when unparsable."""
         try:
-            n = int(float(self.filter_window_length.get()))
+            ms = float(self.filter_window_ms.get())
+            if not (math.isfinite(ms) and ms > 0):
+                raise ValueError
+            n = int(round(ms * 1e-3 / self.sample_interval()))
         except (ValueError, tk.TclError):
             n = DEFAULT_FILTER_WINDOW
         return max(n, MIN_FILTER_WINDOW)
+
+    def on_filter_toggled(self) -> None:
+        self.filtering = bool(self.filter_var.get())
+        self.plot()
+        self.update_fitted_line()
+
+    def toggle_filter(self) -> None:
+        self.filter_var.set(not self.filter_var.get())
+        self.on_filter_toggled()
+
+    def on_filter_window_changed(self, event=None) -> None:
+        if self.filtering:
+            self.plot()
+            self.update_fitted_line()
+        else:
+            self.update_filter_note()
+
+    def update_filter_note(self) -> None:
+        n = self.filter_window()
+        self.filter_note_var.set(f"= {n} samples" + ("" if self.filtering else " (filter off)"))
+
+    # ---------------------------------------------------------------- plot
+    def on_mechanical_toggled(self) -> None:
+        type(self).show_mechanical_default = bool(self.mechanical_var.get())
+        if self.ax_wave is not None:
+            self.xlim = self.ax_wave.get_xlim()
+        self.plot()
+        self.update_fitted_line()
 
     def plot(self):
         exp_number = self.exp_number()
@@ -316,24 +456,28 @@ class DynamicStrainArrivalPickerView(EventView):
         self.fitting_markers = []
         self.not_fitting_markers = []
         self.fitted_line = None
-        gs = self.figure.add_gridspec(5, hspace=0, height_ratios=[1, 1, 1, 1, 10])
-        self.axs = gs.subplots(sharex=True)
-        self.axs[0].set_ylabel(r"$\tau$ (MPa)")
-        self.axs[1].set_ylabel(r"$\mu$")
-        self.axs[2].set_ylabel(r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$")
-        self.axs[3].set_ylabel(r"$\delta\ \mathrm{({\mu}m)}$")
+        if self.mechanical_var.get():
+            gs = self.figure.add_gridspec(5, hspace=0, height_ratios=[1, 1, 1, 1, 10])
+            self.axs = list(gs.subplots(sharex=True))
+            event_time = float(self.event["event_time"])
+            t = (np.asarray(self.event["time"], dtype=float) - event_time) * 1e3
+            for ax, (key, label) in zip(self.axs, MECHANICAL):
+                ax.set_ylabel(label)
+                if key == "slip":
+                    values = self.fault_slip(self.event)
+                else:
+                    values = self.event.get(key)
+                if values is None:
+                    continue
+                values = np.asarray(values, dtype=float)
+                if key in ("LP_displacement", "slip"):
+                    values = values - values[0]
+                ax.plot(t, values, linestyle, color="C0")
+        else:
+            self.axs = [self.figure.add_subplot(1, 1, 1)]
+        self.ax_wave = self.axs[-1]
 
-        event_time = self.event["event_time"]
-        t = np.asarray(self.event["time"]) - event_time
-        self.axs[0].plot(t, self.event["shear_stress"], linestyle, color="C0")
-        self.axs[1].plot(t, self.event["friction"], linestyle, color="C0")
-        lp = np.asarray(self.event["LP_displacement"])
-        self.axs[2].plot(t, lp - lp[0], linestyle, color="C0")
-        disp = self.fault_slip(self.event)
-        if disp is not None:
-            self.axs[3].plot(t, disp - disp[0], linestyle, color="C0")
-
-        tt = waveform_time(strain) - event_time
+        tt = self.relative_time_s() * 1e3
         y = np.array(waveform_data(strain), dtype=float, copy=True)
         n_channels = y.shape[0]
 
@@ -347,11 +491,9 @@ class DynamicStrainArrivalPickerView(EventView):
 
         if self.filtering:
             nf = self.filter_window()
-            # keep the spinbox showing the window that was actually applied
-            if self.filter_window_length.get() != str(nf):
-                self.filter_window_length.set(str(nf))
             for i in range(n_channels):
                 y[i, :] = signal.savgol_filter(y[i, :], nf, FILTER_POLYORDER)
+        self.update_filter_note()
 
         self.lines = [None] * n_channels
         line_idx = 0
@@ -359,18 +501,19 @@ class DynamicStrainArrivalPickerView(EventView):
             if not self.enabled_channels[i]:
                 continue
             loc = self.locations[i]
-            self.axs[4].plot([tt[0], tt[-1]], [loc, loc], "k:", zorder=-101)
+            self.ax_wave.plot([tt[0], tt[-1]], [loc, loc], "k:", zorder=-101)
             span = y[i, :].max() - y[i, :].min()
             ratio = -amplitude / span if span > 0 else 0.0
-            self.lines[i] = self.axs[4].plot(tt, y[i, :] * ratio + loc, color="C%d" % line_idx, zorder=-100)[0]
+            self.lines[i] = self.ax_wave.plot(tt, y[i, :] * ratio + loc, color="C%d" % line_idx, zorder=-100,
+                                              lw=2.0 if i == self.channel else 1.0)[0]
             line_idx += 1
-        self.axs[4].set_ylabel("location along fault (mm)")
-        self.axs[4].set_xlabel("time - %f (s)" % event_time)
-        self.axs[4].set_ylim(max(self.locations) + amplitude, min(self.locations) - amplitude)
+        self.ax_wave.set_ylabel("location along fault (mm)")
+        self.ax_wave.set_xlabel("time from the event (ms)")
+        self.ax_wave.set_ylim(max(self.locations) + amplitude, min(self.locations) - amplitude)
         if self.xlim is None:
-            self.axs[0].set_xlim(tt[0], tt[-1])
+            self.ax_wave.set_xlim(tt[0], tt[-1])
         else:
-            self.axs[0].set_xlim(self.xlim)
+            self.ax_wave.set_xlim(self.xlim)
         self.figure.suptitle(f"{self.figure_title()}: {self.record_key}")
 
         if self.picked_idx is None or len(self.picked_idx) != n_channels:
@@ -393,7 +536,7 @@ class DynamicStrainArrivalPickerView(EventView):
             x, y = self.lines[i].get_data()
             marker = patches.Ellipse((x[idx], y[idx]), width=width, height=height, color=color,
                                      fill=False, lw=2, picker=8, label=str(i))
-            self.axs[4].add_patch(marker)
+            self.ax_wave.add_patch(marker)
             if self.fitting_channels[i]:
                 self.fitting_markers.append(marker)
             else:
@@ -401,10 +544,10 @@ class DynamicStrainArrivalPickerView(EventView):
         self.canvas.draw()
 
     def get_circle_dims(self):
-        xl = self.axs[4].get_xlim()
-        yl = self.axs[4].get_ylim()
+        xl = self.ax_wave.get_xlim()
+        yl = self.ax_wave.get_ylim()
         ratio = (yl[-1] - yl[0]) / (xl[-1] - xl[0])
-        bbox = self.axs[4].get_window_extent()
+        bbox = self.ax_wave.get_window_extent()
         ax_size = [bbox.width, bbox.height]
         ratio *= ax_size[0] / ax_size[1]
         width = (xl[-1] - xl[0]) / ax_size[0] * 0.1 * self.figure.dpi
@@ -418,7 +561,24 @@ class DynamicStrainArrivalPickerView(EventView):
                 marker.set_width(width)
                 marker.set_height(height)
             self.canvas.draw()
-            self.xlim = self.axs[0].get_xlim()
+            self.xlim = self.ax_wave.get_xlim()
+
+    def zoom_to_picks(self) -> None:
+        """Show the shown channels' picks with a margin around them."""
+        times = [self.relative_time_s()[int(self.picked_idx[i])] * 1e3
+                 for i in range(len(self.picked_idx)) if self.enabled_channels[i]]
+        tt = self.relative_time_s() * 1e3
+        if not times:
+            return
+        lo, hi = min(times), max(times)
+        half = max(ZOOM_MARGIN_FRACTION * (hi - lo), ZOOM_MIN_HALFWIDTH_FRACTION * (tt[-1] - tt[0]))
+        self.ax_wave.set_xlim(max(lo - half, tt[0]), min(hi + half, tt[-1]))   # never wider than the record
+        self.on_resize()
+
+    def show_whole_record(self) -> None:
+        tt = self.relative_time_s() * 1e3
+        self.ax_wave.set_xlim(tt[0], tt[-1])
+        self.on_resize()
 
     # ------------------------------------------------------------- dragging
     def on_pick(self, event):
@@ -452,21 +612,18 @@ class DynamicStrainArrivalPickerView(EventView):
             return
         if not isinstance(self.current_artist, patches.Ellipse):
             return
-        try:
-            channel = int(self.current_artist.get_label())
-            dx, dy = self.offset
-            cx, cy = event.xdata + dx, event.ydata + dy
-            xl = self.axs[4].get_xlim()
-            yl = self.axs[4].get_ylim()
-            yw = yl[-1] - yl[0]
-            xw = xl[-1] - xl[0]
-            x, y = self.lines[channel].get_data()
-            idx = int(np.argmin(((x - cx) / xw) ** 2 + ((y - cy) / yw) ** 2))
-            self.current_artist.set_center((x[idx], y[idx]))
-            self.picked_idx[channel] = idx
-            self.update_fitted_line()
-        except Exception as e:
-            print(f"Error in on_motion: {e}")
+        channel = int(self.current_artist.get_label())
+        dx, dy = self.offset
+        cx, cy = event.xdata + dx, event.ydata + dy
+        xl = self.ax_wave.get_xlim()
+        yl = self.ax_wave.get_ylim()
+        yw = yl[-1] - yl[0]
+        xw = xl[-1] - xl[0]
+        x, y = self.lines[channel].get_data()
+        idx = int(np.argmin(((x - cx) / xw) ** 2 + ((y - cy) / yw) ** 2))
+        self.current_artist.set_center((x[idx], y[idx]))
+        self.picked_idx[channel] = idx
+        self.update_fitted_line()
 
     # ------------------------------------------------------------------ fit
     @staticmethod
@@ -494,6 +651,11 @@ class DynamicStrainArrivalPickerView(EventView):
             return None
         return float(coeffs[0]), float(coeffs[1])
 
+    def fit_channels(self) -> list:
+        """The channels the line goes through: shown and fitting."""
+        return [i for i in range(len(self.picked_idx))
+                if self.enabled_channels[i] and self.fitting_channels[i] and self.lines[i] is not None]
+
     def update_fitted_line(self):
         if self.fitted_line is not None:
             try:
@@ -501,19 +663,21 @@ class DynamicStrainArrivalPickerView(EventView):
             except ValueError:
                 pass
             self.fitted_line = None
-        locations = self.locations
-        x = [marker.get_center()[0] for marker in self.fitting_markers]
-        y = [locations[int(marker.get_label())] for marker in self.fitting_markers]
+        chans = self.fit_channels()
+        times = self.pick_times_s()
+        locs = [self.locations[i] for i in chans]
         self.rupture_speed = math.nan
-        fit = self.fit_arrival_line(y, x)
+        fit = self.fit_arrival_line(locs, [times[i] for i in chans])
         if fit is not None:
             slope, intercept = fit
-            yy = np.asarray(y, dtype=float)
-            self.fitted_line = self.axs[4].plot(slope * yy + intercept, yy, "r--")[0]
+            yy = np.asarray(locs, dtype=float)
+            self.fitted_line = self.ax_wave.plot((slope * yy + intercept) * 1e3, yy, "r--")[0]
             if slope != 0:
                 self.rupture_speed = -1e-3 / slope  # mm/s -> m/s, sign = propagation direction
         self.canvas.draw()
         self.update_cf_label()
+        self.fill_table()
+        self.update_status()
         self.update_idletasks()
 
     def has_rupture_speed(self) -> bool:
@@ -528,6 +692,99 @@ class DynamicStrainArrivalPickerView(EventView):
         else:
             text = f"Cf = {cf:.2e} m/s"
         self.cf_label.configure(text=text)
+
+    # --------------------------------------------------------------- table
+    def fill_table(self) -> None:
+        """One row per channel: name, x, arrival (ms from the event), shown, fitted."""
+        if self.picked_idx is None:
+            return
+        names = self.channel_names()
+        times = self.pick_times_s()
+        self._filling_table = True
+        try:
+            self.table.delete(*self.table.get_children())
+            for i in range(len(self.picked_idx)):
+                shown = bool(self.enabled_channels[i])
+                self.table.insert("", "end", iid=str(i), values=(
+                    names[i] if i < len(names) else f"ch {i}", _ms(self.locations[i]),
+                    _ms(times[i] * 1e3, 5) if shown else "", CHECK if shown else "",
+                    CHECK if self.fitting_channels[i] else ""))
+            if 0 <= self.channel < len(self.picked_idx):
+                self.table.selection_set(str(self.channel))
+                self.table.see(str(self.channel))
+        finally:
+            self._filling_table = False
+
+    def on_table_click(self, event) -> None:
+        """A click on the show or fit cell toggles it."""
+        row = self.table.identify_row(event.y)
+        column = self.table.identify_column(event.x)
+        if not row or not column:
+            return
+        name = TABLE_COLUMNS[int(column[1:]) - 1][0]
+        if name == "show":
+            self.set_shown(int(row), not self.enabled_channels[int(row)])
+        elif name == "fit":
+            self.set_fitting(int(row), not self.fitting_channels[int(row)])
+
+    def on_table_select(self, event=None) -> None:
+        if self._filling_table:
+            return
+        selection = self.table.selection()
+        if selection and int(selection[0]) != self.channel:
+            self.select_channel(int(selection[0]))
+
+    def select_channel(self, i: int) -> None:
+        """Make channel ``i`` the selected one; its trace is drawn thicker."""
+        self.channel = int(i)
+        for k, line in enumerate(self.lines):
+            if line is not None:
+                line.set_linewidth(2.0 if k == self.channel else 1.0)
+        self.canvas.draw_idle()
+        self.fill_table()
+
+    def set_shown(self, i: int, value: bool) -> None:
+        self.enabled_channels[i] = bool(value)
+        self.xlim = self.ax_wave.get_xlim()
+        self.plot()
+        self.update_fitted_line()
+
+    def set_fitting(self, i: int, value: bool) -> None:
+        self.fitting_channels[i] = bool(value)
+        self.draw_markers()
+        self.update_fitted_line()
+
+    def set_all_shown(self, value: bool = True) -> None:
+        self.enabled_channels = [bool(value)] * len(self.enabled_channels)
+        self.xlim = self.ax_wave.get_xlim()
+        self.plot()
+        self.update_fitted_line()
+
+    def fit_all_shown(self) -> None:
+        self.fitting_channels = [bool(v) for v in self.enabled_channels]
+        self.draw_markers()
+        self.update_fitted_line()
+
+    # --------------------------------------------------------------- status
+    def current_state(self) -> tuple:
+        return (tuple(int(i) for i in self.picked_idx), tuple(bool(v) for v in self.enabled_channels),
+                tuple(bool(v) for v in self.fitting_channels))
+
+    def update_status(self, message: Optional[str] = None) -> None:
+        """The status line: a message, then whether the picks are saved."""
+        if self.picked_idx is None:
+            return
+        if self.saved_state is None:
+            state = "not saved"
+        elif self.current_state() == self.saved_state:
+            state = "saved"
+        else:
+            state = "differs from the saved record"
+        parts = [message] if message else []
+        if not self.has_rupture_speed():
+            parts.append("Cf n/a: the fitted picks define no line (fewer than two positions, or one time)")
+        parts.append(state)
+        self.status_var.set(" | ".join(parts))
 
     # ---------------------------------------------------------------- save
     def save(self):
@@ -544,49 +801,10 @@ class DynamicStrainArrivalPickerView(EventView):
             "rupture_speed": float(self.rupture_speed) if self.has_rupture_speed() else None,
         }
         write_arrivals(block, arrivals, self.event)
-        if not self.has_rupture_speed():
-            print(f"No rupture speed saved for runs[{self.run_idx}]/events[{self.event_idx}] ({self.record_key}): "
-                  "the arrival picks do not define a line (Cf = n/a).")
+        self.saved_state = self.current_state()
         self.app.refresh_tree()
-        print(f"Saved runs[{self.run_idx}]/events[{self.event_idx}] ({self.record_key}) to data.")
-
-    # --------------------------------------------------------------- menus
-    @staticmethod
-    def _fill_channel_menu(menubutton, flags, command):
-        menubutton.menu.delete(0, "end")
-        menubutton.items = [tk.IntVar(value=int(bool(flag))) for flag in flags]
-        for i, var in enumerate(menubutton.items):
-            menubutton.menu.add_checkbutton(label="channel %d" % i, variable=var, command=command)
-
-    def init_enabled_channels_mb(self):
-        self._fill_channel_menu(self.enabled_channels_mb, self.enabled_channels, self.enabled_channels_changed)
-
-    def init_fitting_channels_mb(self):
-        self._fill_channel_menu(self.fitting_channels_mb, self.fitting_channels, self.fitting_channels_changed)
-
-    def enabled_channels_changed(self):
-        self.enabled_channels = [bool(var.get()) for var in self.enabled_channels_mb.items]
-        self.plot()
-        self.update_fitted_line()
-
-    def fitting_channels_changed(self):
-        self.fitting_channels = [bool(var.get()) for var in self.fitting_channels_mb.items]
-        self.draw_markers()
-        self.update_fitted_line()
-
-    # -------------------------------------------------------------- filter
-    def toggle_filter(self):
-        self.filtering = not self.filtering
-        if self.filtering:
-            self.filter_toggle.config(text="Filter On", relief="sunken")
-        else:
-            self.filter_toggle.config(text="Filter Off", relief="raised")
-        self.plot()
-        self.update_fitted_line()
-
-    def on_filter_window_length_box_changed(self, event=None):
-        self.plot()
-        self.update_fitted_line()
+        note = "" if self.has_rupture_speed() else " without a rupture speed"
+        self.update_status(f"saved to {self.record_key}{note}")
 
     # --------------------------------------------------------------- magic
     def magic(self):
