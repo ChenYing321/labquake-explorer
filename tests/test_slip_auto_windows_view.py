@@ -117,7 +117,7 @@ def test_apply_to_events_keeps_hand_placed_records_and_lists_what_to_check(slip_
     assert out["done"] == [0, 1, 2, 3] and out["kept"] == []
 
 
-def hand_fixed(view, event, sensor, shift_s=0.15):
+def move_manually(view, event, sensor, shift_s=0.15):
     """Move one sensor's after window of an event saved with auto windows, and save; its new window."""
     view.set_event(event)
     view.set_sensor(sensor)
@@ -133,24 +133,24 @@ def after_window(slip_app, event, sensor):
     return tuple(float(v) for v in record["fit_after_s"][sensor]), list(record[sdv.AUTO_KEY]["applied"])
 
 
-@pytest.mark.parametrize("mode, sensor_kept, hand_event_kept", [
-    (sdv.KEEP_HAND, True, True), (sdv.KEEP_EVENTS, False, True), (sdv.KEEP_NONE, False, False)])
-def test_running_again_keeps_what_the_choice_says(slip_app, view, monkeypatch, mode, sensor_kept, hand_event_kept):
-    assert view.keep_mode() == sdv.KEEP_HAND                       # the default keeps every hand-placed window
+@pytest.mark.parametrize("mode, sensor_kept, manual_event_kept", [
+    (sdv.KEEP_MANUAL, True, True), (sdv.KEEP_MANUAL_EVENTS, False, True), (sdv.KEEP_NONE, False, False)])
+def test_running_again_keeps_what_the_choice_says(slip_app, view, monkeypatch, mode, sensor_kept, manual_event_kept):
+    assert view.keep_mode() == sdv.KEEP_MANUAL                     # the default keeps every manual window
     view.auto_events_var.set("0-3")
     assert view.apply_auto_to_events(confirm=False)["done"] == [0, 1, 2, 3]
-    moved = hand_fixed(view, EVENT, 2)                             # one sensor corrected by hand after the auto run
-    event3 = slip_app.data_manager.get_data("runs/[0]/events/[3]")  # event 3: every window placed by hand
+    moved = move_manually(view, EVENT, 2)                          # one sensor corrected by hand after the auto run
+    event3 = slip_app.data_manager.get_data("runs/[0]/events/[3]")  # event 3: a manual event
     event3["slip_analysis"] = {k: v for k, v in event3["slip_analysis"].items() if k != sdv.AUTO_KEY}
-    hand_record = event3["slip_analysis"]
+    manual_record = event3["slip_analysis"]
     view.set_event(0)
     view.auto_keep_var.set(sdv.KEEP_LABELS[mode])
     messages = []
     monkeypatch.setattr(sdv.messagebox, "askokcancel", lambda title, text, **k: messages.append(text) or True)
     out = view.apply_auto_to_events()
     # the confirmation counts what is kept and what is overwritten
-    assert "1 event(s) saved by hand" in messages[0] and "1 sensor(s) moved by hand" in messages[0]
-    assert ("Overwritten" in messages[0]) == (mode != sdv.KEEP_HAND)
+    assert "1 manual event(s)" in messages[0] and "1 manual sensor(s)" in messages[0]
+    assert ("Overwritten" in messages[0]) == (mode != sdv.KEEP_MANUAL)
     window, applied = after_window(slip_app, EVENT, 2)
     if sensor_kept:
         assert window == pytest.approx(moved) and applied[2] is False and applied[3] is True
@@ -158,28 +158,28 @@ def test_running_again_keeps_what_the_choice_says(slip_app, view, monkeypatch, m
     else:
         assert window != pytest.approx(moved) and applied[2] is True
     event3 = slip_app.data_manager.get_data("runs/[0]/events/[3]")["slip_analysis"]
-    assert (3 in out["kept"]) == hand_event_kept
-    assert (sdv.AUTO_KEY not in event3) == hand_event_kept
-    if hand_event_kept:
-        assert event3 is hand_record
+    assert (3 in out["kept"]) == manual_event_kept
+    assert (sdv.AUTO_KEY not in event3) == manual_event_kept
+    if manual_event_kept:
+        assert event3 is manual_record
 
 
-def test_apply_to_this_event_keeps_hand_placed_windows(slip_app, view):
+def test_apply_to_this_event_keeps_manual_windows(slip_app, view):
     assert view.apply_auto_windows() and view.save()
-    moved = hand_fixed(view, EVENT, 4)
-    assert view.apply_auto_windows()                               # the default keeps the sensor moved by hand
+    moved = move_manually(view, EVENT, 4)
+    assert view.apply_auto_windows()                               # the default keeps the manual sensor
     assert view.fit_after[4] == pytest.approx(moved) and view.auto_info[4] is None
-    assert "kept 1 sensor(s) placed by hand" in view.status_var.get()
+    assert "kept 1 manual sensor(s)" in view.status_var.get()
     view.auto_keep_var.set(sdv.KEEP_LABELS[sdv.KEEP_NONE])
     assert view.apply_auto_windows()
     assert view.fit_after[4] != pytest.approx(moved) and view.auto_info[4] is not None
-    # an event saved with every window by hand is kept whole unless told to overwrite
+    # a manual event is kept whole unless told to overwrite
     view.set_event(2)
     assert view.save()
     view.set_event(2)
-    view.auto_keep_var.set(sdv.KEEP_LABELS[sdv.KEEP_HAND])
+    view.auto_keep_var.set(sdv.KEEP_LABELS[sdv.KEEP_MANUAL])
     before = list(view.fit_after)
-    assert not view.apply_auto_windows() and "placed by hand and is kept" in view.status_var.get()
+    assert not view.apply_auto_windows() and "is manual and is kept" in view.status_var.get()
     assert view.fit_after == before
 
 

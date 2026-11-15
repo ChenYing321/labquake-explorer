@@ -75,11 +75,12 @@ background (pre-event) rate; the before window ahead of the onset.  A sensor
 whose creep is close to its coseismic rate is flagged for a check.  "Apply to
 this event" places them for the event shown; "Apply and save to the events"
 does it for the events typed (``1-5, 8``; blank: the run's list, else every
-event), saving each, and keeps the events saved with windows placed by hand
-while its box is ticked.  The sensors to check are listed; a click opens one.
+event), saving each.  Both keep the manual windows (moved by hand, or of an
+event saved without auto windows) as the box's choice says: all of them, the
+manual events only, or none.  The sensors to check are listed; a click opens one.
 A typed list is stored as the run's ``slip_analysis.events``.  The record then
 holds ``auto_windows``: the settings, which sensors' windows the auto windows
-placed (a window moved by hand afterwards is no longer one), how, and their
+placed (a window moved by hand afterwards is manual, no longer one), how, and their
 flags.
 """
 from __future__ import annotations
@@ -140,13 +141,13 @@ TEXT_WRAP_PX = 250                     # the fit texts wrap at this width
 AUTO_KEY = "auto_windows"              # in a slip_analysis record: how the auto windows placed them
 AUTO_VERSION = 1
 RUN_KEY = "slip_analysis"              # run level: {"version", "events"}, the events chosen for the analysis
-# what the auto windows may replace: every window placed by hand is kept (the default), only the
-# events saved with hand-placed windows are kept, or nothing is kept
-KEEP_HAND = "hand"
-KEEP_EVENTS = "events"
+# what the auto windows may replace: every manual window is kept (the default), only the manual
+# events (saved without auto windows) are kept, or nothing is kept
+KEEP_MANUAL = "manual"
+KEEP_MANUAL_EVENTS = "manual_events"
 KEEP_NONE = "none"
-KEEP_MODES = (KEEP_HAND, KEEP_EVENTS, KEEP_NONE)
-KEEP_LABELS = {KEEP_HAND: "keep every hand-placed window", KEEP_EVENTS: "keep events saved by hand only",
+KEEP_MODES = (KEEP_MANUAL, KEEP_MANUAL_EVENTS, KEEP_NONE)
+KEEP_LABELS = {KEEP_MANUAL: "keep all manual windows", KEEP_MANUAL_EVENTS: "keep manual events only",
                KEEP_NONE: "overwrite everything"}
 RUN_VERSION = 1
 AUTO_CHECK_WIDTH_PX = 270              # the list of sensors to check: shown this wide ...
@@ -465,7 +466,7 @@ class SlipDistributionView(EventView):
         self._profile_xlim = (0.0, 1.0)
         self._fault_auto = None        # the fault panels' limits as the last redraw set them
         self.auto_info: list = []      # per sensor: the AutoWindows that placed its windows, or None
-        self.hand_placed: list = []    # per sensor: its windows were placed by hand (saved so, or moved here)
+        self.manual: list = []         # per sensor: its windows are manual (saved so, or moved here)
         self.auto_settings: Optional[dict] = None   # the settings the auto windows were placed with
         super().__init__(app, run_idx, event_idx)
 
@@ -797,7 +798,7 @@ class SlipDistributionView(EventView):
         self.auto_factor_var = tk.StringVar(master=self, value=_text(fw.DEFAULT_BACKGROUND_FACTOR))
         self.auto_creep_var = tk.StringVar(master=self, value=_text(fw.DEFAULT_CREEP_RATIO * 100))
         self.auto_events_var = tk.StringVar(master=self, value="")
-        self.auto_keep_var = tk.StringVar(master=self, value=KEEP_LABELS[KEEP_HAND])
+        self.auto_keep_var = tk.StringVar(master=self, value=KEEP_LABELS[KEEP_MANUAL])
         self._entry(frame, "Width (s):", self.auto_width_var, 1, self.update_status, width=6, name="auto width")
         self._entry_at(frame, "Plateau (um):", self.auto_plateau_var, 1, 2, self.update_status,
                        name="auto plateau")
@@ -1536,9 +1537,9 @@ class SlipDistributionView(EventView):
             self.fit_before[i] = tuple(float(v) for v in before)
             self.fit_after[i] = tuple(float(v) for v in after)
             if i < len(self.auto_info):
-                self.auto_info[i] = None         # placed by hand now, not by the auto windows
-            if i < len(self.hand_placed):
-                self.hand_placed[i] = True
+                self.auto_info[i] = None         # manual now, not placed by the auto windows
+            if i < len(self.manual):
+                self.manual[i] = True
         self.recompute()
 
     def on_same_windows_toggled(self) -> None:
@@ -2541,7 +2542,7 @@ class SlipDistributionView(EventView):
 
     # --------------------------------------------------------- auto windows
     # The windows placed from each sensor's own record by analysis/fit_windows.py; the
-    # slip is still measured by analyze_slip as for windows placed by hand.
+    # slip is still measured by analyze_slip as for manual windows.
     def sensor_flags(self, i: int) -> list:
         """The analysis flags of sensor ``i`` and those of its auto windows."""
         flags = list(self.result.sensors[i].flags) if self.result is not None else []
@@ -2549,7 +2550,7 @@ class SlipDistributionView(EventView):
 
     def auto_flags(self, i: int) -> list:
         """The flags of sensor ``i``'s auto windows, and ``FLAG_NEGATIVE`` when the
-        slip they give is below zero; empty for windows placed by hand."""
+        slip they give is below zero; empty for manual windows."""
         info = self.auto_info[i] if i < len(self.auto_info) else None
         if info is None:
             return []
@@ -2593,25 +2594,25 @@ class SlipDistributionView(EventView):
     def keep_mode(self) -> str:
         """What the auto windows may replace: one of ``KEEP_MODES``."""
         label = self.auto_keep_var.get()
-        return next((m for m in KEEP_MODES if KEEP_LABELS[m] == label), KEEP_HAND)
+        return next((m for m in KEEP_MODES if KEEP_LABELS[m] == label), KEEP_MANUAL)
 
-    def saved_by_hand(self) -> bool:
-        """The event shown was saved with every window placed by hand (a record without auto windows)."""
+    def saved_manual(self) -> bool:
+        """The event shown is a manual event: saved without auto windows, every window manual."""
         return isinstance(self.saved, dict) and AUTO_KEY not in self.saved
 
     def kept_sensors(self, mode: Optional[str] = None) -> list:
         """Per sensor: its windows are kept under ``mode`` (the box's choice by
-        default): every hand-placed one (``KEEP_HAND``), those of an event saved
-        by hand (``KEEP_EVENTS``), none (``KEEP_NONE``)."""
+        default): every manual one (``KEEP_MANUAL``), those of a manual event
+        (``KEEP_MANUAL_EVENTS``), none (``KEEP_NONE``)."""
         mode = self.keep_mode() if mode is None else mode
         n = len(self.channels)
         if mode == KEEP_NONE:
             return [False] * n
-        if self.saved_by_hand():
+        if self.saved_manual():
             return [True] * n
-        if mode == KEEP_EVENTS:
+        if mode == KEEP_MANUAL_EVENTS:
             return [False] * n
-        return [bool(v) for v in (list(self.hand_placed) + [False] * n)[:n]]
+        return [bool(v) for v in (list(self.manual) + [False] * n)[:n]]
 
     def apply_auto_windows(self, settings: Optional[dict] = None, mode: Optional[str] = None) -> bool:
         """Place the sensors' windows from their records and recompute; False (and
@@ -2628,7 +2629,7 @@ class SlipDistributionView(EventView):
             return False
         kept = self.kept_sensors(mode)
         if kept and all(kept):
-            self.status_var.set("auto windows: every window of this event was placed by hand and is kept "
+            self.status_var.set("auto windows: every window of this event is manual and is kept "
                                 f"(choose '{KEEP_LABELS[KEEP_NONE]}' to replace them)")
             return False
         try:
@@ -2641,22 +2642,22 @@ class SlipDistributionView(EventView):
             return False
         n = len(found)
         info = (list(self.auto_info) + [None] * n)[:n]
-        hand = (list(self.hand_placed) + [False] * n)[:n]
+        manual = (list(self.manual) + [False] * n)[:n]
         for i, w in enumerate(found):
             if kept[i]:
-                continue                          # placed by hand and kept: its windows and state stay
+                continue                          # manual and kept: its windows and state stay
             if w.before is not None:
                 self.fit_before[i] = tuple(w.before)
             if w.after is not None:
                 self.fit_after[i] = tuple(w.after)
-            info[i], hand[i] = w, False
-        self.auto_info, self.hand_placed = info, hand
+            info[i], manual[i] = w, False
+        self.auto_info, self.manual = info, manual
         self.auto_settings = self.full_auto_settings(settings)
         self.same_windows_var.set(False)
         ok = self.recompute()
         if ok and any(kept):
-            self.status_var.set(f"{self.status_var.get()} | auto windows: kept {sum(kept)} sensor(s) "
-                                "placed by hand")
+            self.status_var.set(f"{self.status_var.get()} | auto windows: kept {sum(kept)} manual "
+                                "sensor(s)")
         return ok
 
     @staticmethod
@@ -2689,10 +2690,10 @@ class SlipDistributionView(EventView):
 
     def restore_auto(self, record: Optional[dict], n: int) -> None:
         """Which sensors' windows the auto windows placed, from a saved record;
-        the others of a saved record were placed by hand."""
+        the others of a saved record are manual."""
         self.auto_info = [None] * n
         self.auto_settings = None
-        self.hand_placed = [isinstance(record, dict)] * n
+        self.manual = [isinstance(record, dict)] * n
         auto = record.get(AUTO_KEY) if isinstance(record, dict) else None
         if not isinstance(auto, dict):
             return
@@ -2711,7 +2712,7 @@ class SlipDistributionView(EventView):
         self.auto_settings = {str(k): float(np.asarray(v).ravel()[0]) for k, v in settings.items()} \
             if isinstance(settings, dict) else None
         for i in range(n):
-            self.hand_placed[i] = not applied[i]
+            self.manual[i] = not applied[i]
             if applied[i]:
                 self.auto_info[i] = fw.AutoWindows(self.fit_before[i], self.fit_after[i], kinds[i],
                                                    background_rate=background[i], creep_ratio=ratio[i],
@@ -2761,9 +2762,10 @@ class SlipDistributionView(EventView):
         return sorted(set(events)), True
 
     def apply_auto_to_events(self, confirm: bool = True) -> Optional[dict]:
-        """Apply the auto windows to the events listed and save each; an event saved
-        without auto windows (placed by hand) is kept while the box is ticked.
-        Returns the events ``done``, ``kept`` and ``failed`` and the sensors to
+        """Apply the auto windows to the events listed and save each, keeping the
+        manual windows as the box's choice says (see :meth:`kept_sensors`).
+        Returns the events ``done``, ``kept`` (manual events left whole) and
+        ``failed``, the manual sensors kept (``kept_sensors``) and the sensors to
         ``check`` (``(event, sensor, flags)``), also listed in the view; None when
         nothing ran.  A typed list of events is stored as the run's list."""
         self.flush_pending()
@@ -2777,16 +2779,16 @@ class SlipDistributionView(EventView):
             self.status_var.set("auto windows: the Burst tab places its own level windows")
             return None
         mode = self.keep_mode()
-        hand_events, hand_sensors = self.hand_placed_counts(events)
-        if mode == KEEP_HAND:
-            note = (f"Kept: {hand_events} event(s) saved by hand and {hand_sensors} sensor(s) moved by hand "
+        manual_events, manual_sensors = self.manual_counts(events)
+        if mode == KEEP_MANUAL:
+            note = (f"Kept: {manual_events} manual event(s) and {manual_sensors} manual sensor(s) "
                     "in events with auto windows.")
-        elif mode == KEEP_EVENTS:
-            note = (f"Kept: {hand_events} event(s) saved by hand.\nOverwritten: {hand_sensors} sensor(s) "
-                    "moved by hand in events with auto windows.")
+        elif mode == KEEP_MANUAL_EVENTS:
+            note = (f"Kept: {manual_events} manual event(s).\nOverwritten: {manual_sensors} manual sensor(s) "
+                    "in events with auto windows.")
         else:
-            note = (f"Overwritten: {hand_events} event(s) saved by hand and {hand_sensors} sensor(s) moved by "
-                    "hand in events with auto windows.")
+            note = (f"Overwritten: {manual_events} manual event(s) and {manual_sensors} manual sensor(s) "
+                    "in events with auto windows.")
         if confirm and not messagebox.askokcancel(
                 "Auto windows", f"Place the windows automatically and save {len(events)} event(s) of "
                                 f"{self.run_label()}?\n{note}", parent=self):
@@ -2827,26 +2829,26 @@ class SlipDistributionView(EventView):
         self.fill_auto_check(out["check"])
         parts = [f"auto windows: {len(out['done'])} event(s) saved"]
         if out["kept"]:
-            parts.append(f"kept (placed by hand): {', '.join(str(k) for k in out['kept'])}")
+            parts.append(f"kept (manual): {', '.join(str(k) for k in out['kept'])}")
         if out["kept_sensors"]:
-            parts.append(f"{len(out['kept_sensors'])} sensor(s) placed by hand kept")
+            parts.append(f"{len(out['kept_sensors'])} manual sensor(s) kept")
         if out["failed"]:
             parts.append("not done: " + ", ".join(f"{k} ({why})" for k, why in out["failed"]))
         parts.append(f"{len(out['check'])} sensor(s) to check")
         self.status_var.set(" | ".join(parts))
         return out
 
-    def hand_placed_counts(self, events) -> tuple:
-        """``(events, sensors)`` of ``events`` placed by hand, from the saved
-        records: the events saved without auto windows, and the sensors moved by
-        hand in events saved with them (the event shown counts as it is now)."""
+    def manual_counts(self, events) -> tuple:
+        """``(events, sensors)`` of ``events`` that are manual, from the saved
+        records: the events saved without auto windows, and the manual sensors
+        of events saved with them (the event shown counts as it is now)."""
         n_events = n_sensors = 0
         for k in events:
             if k == self.event_idx:
-                if self.saved_by_hand():
+                if self.saved_manual():
                     n_events += 1
                 else:
-                    n_sensors += sum(1 for v in self.hand_placed if v)
+                    n_sensors += sum(1 for v in self.manual if v)
                 continue
             event = self.data_manager.get_data(f"{self.run_path}/events/[{k}]")
             record = event.get(self.result_key) if isinstance(event, dict) else None
