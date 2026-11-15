@@ -11,6 +11,13 @@ as in the Slip Distribution view (:func:`slip_profile.fit_front`): one line,
 or ``bilateral``, two lines meeting at a fitted apex; each segment is drawn
 with its speed, a segment the front crosses within one sample is marked
 unresolved, and the table gives every shown channel's residual from it.
+"Auto pick" places the shown channels' picks from their traces as drawn
+(filtered when the filter is on; :mod:`labquake_explorer.analysis.arrival_picks`):
+the onset of the largest difference from the noise level, or of the largest
+slope, above a threshold in multiples of the noise, or the largest value
+(the earlier "Magic").  The noise is the record before its trigger (less a
+guard), else its first fifth.  Channels it cannot pick are flagged in the
+table; a pick moved by hand clears its flag.
 
 The controls sit in a scrolling column on the left: the event and the record,
 a table of the channels (name, position, arrival, whether it is shown and
@@ -43,6 +50,7 @@ from typing import Optional
 import numpy as np
 from scipy import signal
 
+from labquake_explorer.analysis import arrival_picks as ap
 from labquake_explorer.analysis import slip_profile as sprof
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
@@ -64,14 +72,17 @@ MIN_FILTER_WINDOW = FILTER_POLYORDER + 1
 DEFAULT_FILTER_WINDOW = 51            # samples: the window a record opens with, shown in ms
 DEFAULT_TRACE_AMPLITUDE_MM = 12.0     # trace amplitude when the sensor spacing is unknown
 ZOOM_MARGIN_FRACTION = 0.5            # "Zoom to picks": this share of the picks' spread on each side ...
-ZOOM_MIN_HALFWIDTH_FRACTION = 0.02    # ... and at least this share of the record
+ZOOM_MIN_HALFWIDTH_SAMPLES = 50       # ... and at least this many samples
 TEXT_WRAP_PX = 280
 HANDLE_PX = 6                         # a press this close (px) to a pick handle grabs it
 HANDLE_INSET_FRACTION = 0.1           # a handle spans its trace's height less this share at each end
 CHECK = "✓"
 TABLE_COLUMNS = (("channel", 70), ("x (mm)", 60), ("arrival (ms)", 85), ("show", 42), ("fit", 36),
-                 ("resid (\u00b5s)", 70))
+                 ("resid (\u00b5s)", 70), ("flag", 90))
+FLAG_SHORT = {ap.FLAG_WEAK: "weak onset", ap.FLAG_AT_NOISE_END: "at noise end", ap.FLAG_NO_NOISE: "no noise"}
 FRONT_COLOR = "red"
+NOISE_TRIGGER_GUARD_FRACTION = 0.1    # auto pick: the noise ends this share of the pre-trigger record before it
+NOISE_FRACTION = 0.2                  # ... or, without a trigger, after this share of the record
 MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
               ("LP_displacement", r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$"), ("slip", r"$\delta\ \mathrm{({\mu}m)}$"))
 
@@ -100,6 +111,9 @@ class DynamicStrainArrivalPickerView(EventView):
         self._drag = None                   # the channel whose handle is being dragged
         self.front_fit = None
         self.front_lines = []
+        self.auto_flags = []                # per channel: the auto pick's flag, "" when none
+        self.auto_settings = None           # the settings of the last auto pick, saved with the picks
+        self._smoothing_us_default = None
         self.rupture_speed = None
         self.fitted_line = None
         self.filtering = False
@@ -195,6 +209,27 @@ class DynamicStrainArrivalPickerView(EventView):
         ttk.Label(frame, textvariable=self.filter_note_var, foreground="#606060").grid(
             row=2, column=0, columnspan=2, padx=4, sticky="w")
 
+        frame = ttk.LabelFrame(left, text="Auto pick")
+        frame.pack(fill="x", pady=4)
+        ttk.Label(frame, text="Method:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        self.auto_method_var = tk.StringVar(master=self, value=ap.METHOD_LABELS[ap.METHOD_DIFFERENCE])
+        ttk.Combobox(frame, textvariable=self.auto_method_var, state="readonly", width=22,
+                     values=[ap.METHOD_LABELS[m] for m in ap.METHODS]).grid(row=0, column=1, padx=4, pady=2,
+                                                                             sticky="w")
+        ttk.Label(frame, text="Threshold (x noise):").grid(row=1, column=0, padx=4, pady=2, sticky="e")
+        self.auto_threshold_var = tk.StringVar(master=self, value=f"{ap.DEFAULT_THRESHOLD:g}")
+        ttk.Entry(frame, textvariable=self.auto_threshold_var, width=8).grid(row=1, column=1, padx=4, pady=2,
+                                                                            sticky="w")
+        ttk.Label(frame, text="Slope smoothing (\u00b5s):").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        self.auto_smoothing_var = tk.StringVar(master=self, value="")
+        ttk.Entry(frame, textvariable=self.auto_smoothing_var, width=8).grid(row=2, column=1, padx=4, pady=2,
+                                                                            sticky="w")
+        self.noise_note_var = tk.StringVar(master=self, value="")
+        ttk.Label(frame, textvariable=self.noise_note_var, foreground="#606060", wraplength=TEXT_WRAP_PX,
+                  justify="left").grid(row=3, column=0, columnspan=2, padx=4, sticky="w")
+        ttk.Button(frame, text="Pick the shown channels", command=self.auto_pick).grid(
+            row=4, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+
         frame = ttk.LabelFrame(left, text="Rupture front")
         frame.pack(fill="x", pady=4)
         ttk.Label(frame, text="Fit:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
@@ -214,8 +249,6 @@ class DynamicStrainArrivalPickerView(EventView):
         ttk.Label(frame, text="Cf: one line through the fitted picks, -1 / slope (the sign of the published "
                               "analyses; the CZM fitter takes its size)", foreground="#606060",
                   wraplength=TEXT_WRAP_PX, justify="left").grid(row=4, column=0, columnspan=2, padx=4, sticky="w")
-        ttk.Button(frame, text="Magic (largest value of each trace)", command=self.magic).grid(
-            row=5, column=0, columnspan=2, padx=4, pady=2, sticky="w")
 
         frame = ttk.Frame(left)
         frame.pack(fill="x", pady=4)
@@ -351,6 +384,18 @@ class DynamicStrainArrivalPickerView(EventView):
         self.fitting_channels = flags("fitting_channels")
         picks = saved.get("picked_idx")
         self.picked_idx = [int(v) for v in picks] if picks is not None and len(picks) == n else None
+        self.auto_flags = [""] * n
+        self.auto_settings = None
+        auto = saved.get("auto_pick")
+        if isinstance(auto, dict):
+            flags = auto.get("flags")
+            if flags is not None and len(flags) == n:
+                self.auto_flags = [str(np.asarray(f).ravel()[0]) if np.size(f) else "" for f in flags]
+            self.auto_settings = {k: v for k, v in auto.items() if k != "flags"}
+        if self._smoothing_us_default is None or self.auto_smoothing_var.get() == "":
+            us = ap.DEFAULT_SMOOTHING_SAMPLES * self.sample_interval() * 1e6
+            self._smoothing_us_default = float(f"{us:.3g}")
+            self.auto_smoothing_var.set(f"{self._smoothing_us_default:g}")
         mode = saved.get("front_mode")
         mode = str(np.asarray(mode).ravel()[0]) if mode is not None and np.size(mode) else "single"
         self.front_mode_var.set(mode if mode in sprof.FRONT_MODES else "single")
@@ -371,6 +416,7 @@ class DynamicStrainArrivalPickerView(EventView):
         self.rupture_speed = None
         self.fitted_line = None
         self.plot()
+        self.noise_note_var.set(self.noise_end()[1])
         self.saved_state = self.current_state() if self.picked_idx is not None and picks is not None else None
         self.update_fitted_line()
 
@@ -617,7 +663,7 @@ class DynamicStrainArrivalPickerView(EventView):
         if not times:
             return
         lo, hi = min(times), max(times)
-        half = max(ZOOM_MARGIN_FRACTION * (hi - lo), ZOOM_MIN_HALFWIDTH_FRACTION * (tt[-1] - tt[0]))
+        half = max(ZOOM_MARGIN_FRACTION * (hi - lo), ZOOM_MIN_HALFWIDTH_SAMPLES * self.sample_interval() * 1e3)
         self.ax_wave.set_xlim(max(lo - half, tt[0]), min(hi + half, tt[-1]))   # never wider than the record
         self.on_resize()
 
@@ -685,6 +731,8 @@ class DynamicStrainArrivalPickerView(EventView):
         """Put channel ``i``'s pick on sample ``idx`` and move its handle."""
         idx = int(min(max(int(idx), 0), self.relative_time_s().size - 1))
         self.picked_idx[i] = idx
+        if i < len(self.auto_flags):
+            self.auto_flags[i] = ""             # placed by hand now
         marker = self.marker_of(i)
         if marker is not None:
             x, _, _ = self.handle_extent(i)
@@ -850,6 +898,10 @@ class DynamicStrainArrivalPickerView(EventView):
             text = f"Cf = {cf:.2f} m/s"
         else:
             text = f"Cf = {cf:.2e} m/s"
+        fit = self.front_fit
+        if (self.has_rupture_speed() and fit is not None and fit.valid and len(fit.segments) == 2
+                and fit.segments[0].slope_s_per_mm * fit.segments[1].slope_s_per_mm < 0):
+            text += " (one line through a front that runs both ways)"
         self.cf_label.configure(text=text)
 
     # --------------------------------------------------------------- table
@@ -869,7 +921,8 @@ class DynamicStrainArrivalPickerView(EventView):
                     names[i] if i < len(names) else f"ch {i}", _ms(self.locations[i]),
                     _ms(times[i] * 1e3, 5) if shown else "", CHECK if shown else "",
                     CHECK if self.fitting_channels[i] else "",
-                    f"{resid[i] * 1e6:+.3g}" if shown and math.isfinite(resid[i]) else ""))
+                    f"{resid[i] * 1e6:+.3g}" if shown and math.isfinite(resid[i]) else "",
+                    FLAG_SHORT.get(self.auto_flags[i], self.auto_flags[i]) if i < len(self.auto_flags) else ""))
             if 0 <= self.channel < len(self.picked_idx):
                 self.table.selection_set(str(self.channel))
                 self.table.see(str(self.channel))
@@ -965,6 +1018,8 @@ class DynamicStrainArrivalPickerView(EventView):
             "rupture_speed": float(self.rupture_speed) if self.has_rupture_speed() else None,
             "front_mode": self.front_mode_var.get(),
         }
+        if self.auto_settings is not None:
+            arrivals["auto_pick"] = {**self.auto_settings, "flags": list(self.auto_flags)}
         if self.front_fit is not None:
             front = self.front_fit.as_dict()
             front["use"] = [i in self.fit_channels() for i in range(len(self.picked_idx))]
@@ -975,13 +1030,69 @@ class DynamicStrainArrivalPickerView(EventView):
         note = "" if self.has_rupture_speed() else " without a rupture speed"
         self.update_status(f"saved to {self.record_key}{note}")
 
-    # --------------------------------------------------------------- magic
-    def magic(self):
-        """Auto-pick: the extreme of each enabled (plotted) trace."""
-        for i, line in enumerate(self.lines):
-            if line is None:
-                continue
-            x, y = line.get_data()
-            self.picked_idx[i] = int(np.argmin(y))
+    # ------------------------------------------------------------ auto pick
+    def noise_end(self) -> tuple:
+        """``(index, description)``: the auto pick's noise is the record before
+        ``index``: up to its trigger less a guard, else its first fifth."""
+        t = waveform_time(self.current_block())
+        t_trig = waveform_trigger_time(self.current_block(), self.get_run(), self.record_key)
+        if t_trig is not None and t[0] < t_trig <= t[-1]:
+            end_t = t_trig - NOISE_TRIGGER_GUARD_FRACTION * (t_trig - t[0])
+            k = int(np.searchsorted(t, end_t))
+            if k >= ap.MIN_NOISE_SAMPLES:
+                return k, f"noise: the record before its trigger, less {NOISE_TRIGGER_GUARD_FRACTION:.0%} of it"
+        return int(NOISE_FRACTION * t.size), f"noise: the first {NOISE_FRACTION:.0%} of the record (no trigger)"
+
+    def read_auto_settings(self) -> dict:
+        """The Auto pick box as settings (ValueError when unusable)."""
+        label = self.auto_method_var.get()
+        method = next((m for m in ap.METHODS if ap.METHOD_LABELS[m] == label), ap.METHOD_DIFFERENCE)
+        try:
+            threshold = float(self.auto_threshold_var.get())
+        except ValueError:
+            raise ValueError(f"threshold {self.auto_threshold_var.get()!r} is not a number") from None
+        if not (math.isfinite(threshold) and threshold > 0):
+            raise ValueError("the threshold must be > 0")
+        try:
+            us = float(self.auto_smoothing_var.get())
+        except ValueError:
+            raise ValueError(f"slope smoothing {self.auto_smoothing_var.get()!r} is not a number") from None
+        if not (math.isfinite(us) and us >= 0):
+            raise ValueError("the slope smoothing must be >= 0")
+        smoothing = max(1, int(round(us * 1e-6 / self.sample_interval())))
+        return {"method": method, "threshold": threshold, "smoothing_samples": smoothing}
+
+    def auto_pick(self, settings: Optional[dict] = None) -> Optional[list]:
+        """Pick every shown channel from its trace as drawn; channels that cannot
+        be picked keep their pick and are flagged.  Returns the picks (None when
+        the settings are unusable)."""
+        try:
+            settings = self.read_auto_settings() if settings is None else dict(settings)
+        except ValueError as e:
+            self.update_status(f"auto pick: {e}")
+            return None
+        end, note = self.noise_end()
+        shown = [i for i, line in enumerate(self.lines) if line is not None]
+        # the traces as drawn, back on their own scale and sign: loc - y
+        rows = [self.locations[i] - np.asarray(self.lines[i].get_ydata(), dtype=float) for i in shown]
+        picks = ap.auto_pick(rows, settings["method"], end, settings["threshold"], settings["smoothing_samples"]) \
+            if rows else []
+        for i, pick in zip(shown, picks):
+            if pick.index is not None:
+                self.picked_idx[i] = int(pick.index)
+            self.auto_flags[i] = pick.flag
+        t = waveform_time(self.current_block())
+        self.auto_settings = {**settings, "noise_end_s": float(t[min(end, t.size - 1)] - float(self.event["event_time"]))}
+        self.noise_note_var.set(note)
         self.draw_markers()
         self.update_fitted_line()
+        names = self.channel_names()
+        flagged = [f"{names[i]}: {p.flag}" for i, p in zip(shown, picks) if p.flag]
+        self.update_status(f"auto pick ({ap.METHOD_LABELS[settings['method']]}): {len(picks)} channel(s)"
+                           + (f", {len(flagged)} flagged ({'; '.join(flagged)})" if flagged else ""))
+        return picks
+
+    def magic(self):
+        """Auto-pick: the extreme of each enabled (plotted) trace."""
+        return self.auto_pick({"method": ap.METHOD_EXTREME, "threshold": ap.DEFAULT_THRESHOLD,
+                               "smoothing_samples": ap.DEFAULT_SMOOTHING_SAMPLES})

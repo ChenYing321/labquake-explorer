@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from labquake_explorer.ui.context import resolve_context
+from labquake_explorer.analysis import arrival_picks as ap
 from labquake_explorer.ui.views import CZMFitterView, DynamicStrainArrivalPickerView
 
 N_CHANNELS = 16
@@ -574,7 +575,7 @@ def test_zoom_to_picks_and_whole_record(view):
     view.zoom_to_picks()                                   # every pick on one sample: a narrow window around it
     lo, hi = view.ax_wave.get_xlim()
     t0 = tt[view.picked_idx[0]]
-    assert lo < t0 < hi and hi - lo == pytest.approx(0.04 * (tt[-1] - tt[0]))
+    assert lo < t0 < hi and hi - lo == pytest.approx(100 * (tt[1] - tt[0]), rel=1e-3)   # 50 samples each side
     view.magic()
     view.zoom_to_picks()
     lo, hi = view.ax_wave.get_xlim()
@@ -643,6 +644,7 @@ def test_bilateral_front_with_its_apex_and_residuals(app):
         speeds = sorted(seg.velocity_m_s for seg in fit.segments)
         assert speeds[0] == pytest.approx(-1500.0, rel=0.05) and speeds[1] == pytest.approx(1500.0, rel=0.05)
         assert "fronts start at x = " in view.front_text_var.get() and "towards -x" in view.front_text_var.get()
+        assert view.cf_label.cget("text").endswith("(one line through a front that runs both ways)")
         assert len(view.front_lines) == 5                      # two lines, two speed labels, the apex
         # residuals within a sample or two of the hinge
         resid = view.residuals_s()
@@ -699,5 +701,70 @@ def test_the_front_survives_an_hdf5_round_trip_in_both_layouts(app_with_strain, 
         view.record_combobox.set("waveform/elsys")
         view.on_record_selected()
         assert view.front_mode_var.get() == "single" and view.status_var.get().endswith("saved")
+    finally:
+        view.on_close()
+
+
+# --------------------------------------------------------------- auto pick
+def noisy_pzt_record(event, xs, t_trig, fs=200e3, speed=1500.0, noise=0.01, seed=0):
+    time = add_pzt_record(event, xs, t_trig, fs=fs, speed=speed)
+    rng = np.random.default_rng(seed)
+    data = event["waveform"]["elsys"]["data"]
+    event["waveform"]["elsys"]["data"] = data + noise * rng.standard_normal(data.shape)
+    return time
+
+
+@pytest.mark.parametrize("label", ["difference from the noise", "slope"])
+def test_auto_pick_finds_the_onsets_and_the_speed(app, label):
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    xs = [100.0, 200.0, 300.0, 400.0]
+    time = noisy_pzt_record(event, xs, t_trig)
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        assert "before its trigger" in view.noise_note_var.get()
+        view.auto_method_var.set(label)
+        picks = view.auto_pick()
+        assert len(picks) == 4 and all(p.flag == "" for p in picks)
+        onsets = [t_trig + (x - xs[0]) * 1e-3 / 1500.0 for x in xs]
+        for i, onset in enumerate(onsets):                 # within 0.1 ms of the tanh's midpoint
+            assert abs(time[view.picked_idx[i]] - onset) < 1e-4
+        assert abs(view.rupture_speed) == pytest.approx(1500.0, rel=0.1)
+        assert "auto pick (" in view.status_var.get()
+        view.save()
+        auto = event["waveform"]["elsys"]["arrivals"]["auto_pick"]
+        method = "difference" if label.startswith("difference") else "slope"
+        assert auto["method"] == method and auto["threshold"] == 5.0 and auto["flags"] == [""] * 4
+        assert auto["noise_end_s"] < -0.02                 # before the trigger, relative to the event
+    finally:
+        view.on_close()
+
+
+def test_auto_pick_flags_and_hand_moves(app):
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    noisy_pzt_record(event, [100.0, 200.0, 300.0, 400.0], t_trig)
+    event["waveform"]["elsys"]["data"][2] *= 0.0                       # a dead channel: nothing to pick
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        before = view.picked_idx[2]
+        picks = view.auto_pick()
+        assert picks[2].flag == ap.FLAG_WEAK and view.picked_idx[2] == before
+        assert view.table.item("2", "values")[6] == "weak onset" and "1 flagged (pzt_3: weak onset" in view.status_var.get()
+        view.save()
+        # reopening keeps the flag; a pick moved by hand clears it
+        view.on_close()
+        view = DynamicStrainArrivalPickerView(app, 0, 1)
+        assert view.auto_flags[2] == ap.FLAG_WEAK
+        view.set_pick(2, before + 10)
+        assert view.auto_flags[2] == "" and view.table.item("2", "values")[6] == ""
+        # unusable settings: the status says why and nothing moves
+        picks_now = list(view.picked_idx)
+        view.auto_threshold_var.set("0")
+        assert view.auto_pick() is None and "threshold must be > 0" in view.status_var.get()
+        view.auto_threshold_var.set("5")
+        view.auto_smoothing_var.set("x")
+        assert view.auto_pick() is None and "not a number" in view.status_var.get()
+        assert view.picked_idx == picks_now
     finally:
         view.on_close()
