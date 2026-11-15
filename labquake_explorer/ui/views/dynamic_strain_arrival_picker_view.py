@@ -6,7 +6,11 @@ along the fault, on a time axis in ms from the event time.  One handle per shown
 short vertical bar, marks the arrival: it is dragged along the time axis
 only and snaps to a sample, or the arrival of the selected channel is typed
 in ms.  A straight line through the picks of the *fitting* channels gives
-the rupture speed ``Cf``.
+the rupture speed ``Cf``.  The rupture front through the same picks is fitted
+as in the Slip Distribution view (:func:`slip_profile.fit_front`): one line,
+or ``bilateral``, two lines meeting at a fitted apex; each segment is drawn
+with its speed, a segment the front crosses within one sample is marked
+unresolved, and the table gives every shown channel's residual from it.
 
 The controls sit in a scrolling column on the left: the event and the record,
 a table of the channels (name, position, arrival, whether it is shown and
@@ -23,7 +27,10 @@ holds ``picked_idx``, ``arrival_time``, ``enabled_channels``,
 picks define no line), so strain and PZT picks never overwrite each other.
 The PSU ``strain`` layout keeps its historical keys (``strain/original/picked_idx``,
 ``event['rupture_speed']``, ...).  ``rupture_speed`` keeps the sign of the
-published analyses, ``-1 / slope`` of ``time = slope * location``.
+published analyses, ``-1 / slope`` of ``time = slope * location``.  The record
+also holds ``front_mode`` and ``front`` (``FrontFit.as_dict()`` plus ``use``,
+the channels fitted), whose segment speeds are positive towards +x as in
+``slip_analysis``; the PSU layout keeps these two under ``strain/arrivals``.
 """
 from __future__ import annotations
 
@@ -36,10 +43,12 @@ from typing import Optional
 import numpy as np
 from scipy import signal
 
+from labquake_explorer.analysis import slip_profile as sprof
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
 from labquake_explorer.ui.views.scroll_panel import ScrollPanel
+from labquake_explorer.ui.views.slip_distribution_view import apex_text, segment_speed_label, segment_text
 from labquake_explorer.data.channels import aligned_fields, get_field
 from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
                                             waveform_channels, waveform_data, waveform_time, waveform_trigger_time,
@@ -60,7 +69,9 @@ TEXT_WRAP_PX = 280
 HANDLE_PX = 6                         # a press this close (px) to a pick handle grabs it
 HANDLE_INSET_FRACTION = 0.1           # a handle spans its trace's height less this share at each end
 CHECK = "✓"
-TABLE_COLUMNS = (("channel", 70), ("x (mm)", 60), ("arrival (ms)", 85), ("show", 42), ("fit", 36))
+TABLE_COLUMNS = (("channel", 70), ("x (mm)", 60), ("arrival (ms)", 85), ("show", 42), ("fit", 36),
+                 ("resid (\u00b5s)", 70))
+FRONT_COLOR = "red"
 MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
               ("LP_displacement", r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$"), ("slip", r"$\delta\ \mathrm{({\mu}m)}$"))
 
@@ -87,6 +98,8 @@ class DynamicStrainArrivalPickerView(EventView):
         self.fitting_markers = []
         self.not_fitting_markers = []
         self._drag = None                   # the channel whose handle is being dragged
+        self.front_fit = None
+        self.front_lines = []
         self.rupture_speed = None
         self.fitted_line = None
         self.filtering = False
@@ -182,14 +195,27 @@ class DynamicStrainArrivalPickerView(EventView):
         ttk.Label(frame, textvariable=self.filter_note_var, foreground="#606060").grid(
             row=2, column=0, columnspan=2, padx=4, sticky="w")
 
-        frame = ttk.LabelFrame(left, text="Rupture speed")
+        frame = ttk.LabelFrame(left, text="Rupture front")
         frame.pack(fill="x", pady=4)
+        ttk.Label(frame, text="Fit:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        self.front_mode_var = tk.StringVar(master=self, value="single")
+        self.front_mode_combobox = ttk.Combobox(frame, textvariable=self.front_mode_var, state="readonly",
+                                                width=10, values=list(sprof.FRONT_MODES))
+        self.front_mode_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        self.front_mode_combobox.bind("<<ComboboxSelected>>", lambda e: self.update_fitted_line(), add="+")
+        ttk.Label(frame, text="single: one line; bilateral: two lines that meet at a fitted apex",
+                  foreground="#606060", wraplength=TEXT_WRAP_PX, justify="left").grid(
+            row=1, column=0, columnspan=2, padx=4, sticky="w")
+        self.front_text_var = tk.StringVar(master=self, value="")
+        ttk.Label(frame, textvariable=self.front_text_var, wraplength=TEXT_WRAP_PX, justify="left").grid(
+            row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         self.cf_label = ttk.Label(frame, text="Cf = n/a")
-        self.cf_label.grid(row=0, column=0, padx=4, pady=2, sticky="w")
-        ttk.Label(frame, text="one line through the fitted picks; Cf = -1 / slope", foreground="#606060",
-                  wraplength=TEXT_WRAP_PX, justify="left").grid(row=1, column=0, padx=4, sticky="w")
+        self.cf_label.grid(row=3, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        ttk.Label(frame, text="Cf: one line through the fitted picks, -1 / slope (the sign of the published "
+                              "analyses; the CZM fitter takes its size)", foreground="#606060",
+                  wraplength=TEXT_WRAP_PX, justify="left").grid(row=4, column=0, columnspan=2, padx=4, sticky="w")
         ttk.Button(frame, text="Magic (largest value of each trace)", command=self.magic).grid(
-            row=2, column=0, padx=4, pady=2, sticky="w")
+            row=5, column=0, columnspan=2, padx=4, pady=2, sticky="w")
 
         frame = ttk.Frame(left)
         frame.pack(fill="x", pady=4)
@@ -325,6 +351,9 @@ class DynamicStrainArrivalPickerView(EventView):
         self.fitting_channels = flags("fitting_channels")
         picks = saved.get("picked_idx")
         self.picked_idx = [int(v) for v in picks] if picks is not None and len(picks) == n else None
+        mode = saved.get("front_mode")
+        mode = str(np.asarray(mode).ravel()[0]) if mode is not None and np.size(mode) else "single"
+        self.front_mode_var.set(mode if mode in sprof.FRONT_MODES else "single")
         locations = saved.get("locations")
         if locations is not None and len(locations) == n:
             self.locations = [float(v) for v in locations]
@@ -469,6 +498,7 @@ class DynamicStrainArrivalPickerView(EventView):
         self.fitting_markers = []
         self.not_fitting_markers = []
         self.fitted_line = None
+        self.front_lines = []
         if self.mechanical_var.get():
             gs = self.figure.add_gridspec(5, hspace=0, height_ratios=[1, 1, 1, 1, 10])
             self.axs = list(gs.subplots(sharex=True))
@@ -729,28 +759,85 @@ class DynamicStrainArrivalPickerView(EventView):
                 if self.enabled_channels[i] and self.fitting_channels[i] and self.lines[i] is not None]
 
     def update_fitted_line(self):
-        if self.fitted_line is not None:
+        """Cf from one line through the fitted picks, and the rupture front (single
+        or bilateral) through them, drawn with each segment's speed."""
+        for artist in self.front_lines:
             try:
-                self.fitted_line.remove()
+                artist.remove()
             except ValueError:
                 pass
-            self.fitted_line = None
+        self.front_lines = []
+        self.fitted_line = None
         chans = self.fit_channels()
         times = self.pick_times_s()
         locs = [self.locations[i] for i in chans]
         self.rupture_speed = math.nan
         fit = self.fit_arrival_line(locs, [times[i] for i in chans])
-        if fit is not None:
-            slope, intercept = fit
-            yy = np.asarray(locs, dtype=float)
-            self.fitted_line = self.ax_wave.plot((slope * yy + intercept) * 1e3, yy, "r--")[0]
-            if slope != 0:
-                self.rupture_speed = -1e-3 / slope  # mm/s -> m/s, sign = propagation direction
+        if fit is not None and fit[0] != 0:
+            self.rupture_speed = -1e-3 / fit[0]  # mm/s -> m/s, the sign of the published analyses
+        use = [i in chans for i in range(len(self.picked_idx))]
+        try:
+            self.front_fit = sprof.fit_front(self.locations, times, use=use, mode=self.front_mode_var.get(),
+                                             dt_s=self.sample_interval())
+        except ValueError as e:
+            self.front_fit = sprof.FrontFit(self.front_mode_var.get(), False, str(e))
+        self.draw_front()
         self.canvas.draw()
         self.update_cf_label()
+        self.front_text_var.set(self.front_text())
         self.fill_table()
         self.update_status()
         self.update_idletasks()
+
+    def draw_front(self) -> None:
+        """The front's segments (time against position) with their speeds, and the apex."""
+        fit = self.front_fit
+        if fit is None or not fit.valid:
+            return
+        ax = self.ax_wave
+        for seg in fit.segments:
+            xx = np.array([seg.x_from, seg.x_to])
+            tt = 1e3 * (seg.slope_s_per_mm * xx + seg.intercept_s)
+            self.front_lines.append(ax.plot(tt, xx, "--", color=FRONT_COLOR, lw=1.5, zorder=4)[0])
+            self.front_lines.append(ax.annotate(segment_speed_label(seg), (tt.mean(), xx.mean()),
+                                                textcoords="offset points", xytext=(6, 0), ha="left",
+                                                va="center", fontsize=8, color=FRONT_COLOR))
+        if math.isfinite(fit.split_x_mm) and math.isfinite(fit.t0_s) and fit.mode == "bilateral":
+            self.front_lines.append(ax.plot([1e3 * fit.t0_s], [fit.split_x_mm], "D", mfc="none", mec=FRONT_COLOR,
+                                            mew=1.4, ms=8, zorder=6)[0])
+        if fit.mode == "single" and self.has_rupture_speed():
+            self.fitted_line = self.front_lines[0]
+
+    def front_text(self) -> str:
+        fit = self.front_fit
+        if fit is None:
+            return ""
+        if not fit.valid:
+            return f"front: {fit.reason}"
+        lines = [segment_text(seg) for seg in fit.segments]
+        apex = apex_text(fit)
+        if apex:
+            lines.append(apex)
+        return "\n".join(lines)
+
+    def residuals_s(self) -> list:
+        """Each channel's pick minus the front at its position (s); NaN without a front.
+        A channel beyond the fitted segments is compared with the nearest one."""
+        fit = self.front_fit
+        n = len(self.picked_idx)
+        if fit is None or not fit.valid or not fit.segments:
+            return [math.nan] * n
+        times = self.pick_times_s()
+        out = []
+        for i in range(n):
+            x = self.locations[i]
+
+            def gap(seg):
+                lo, hi = min(seg.x_from, seg.x_to), max(seg.x_from, seg.x_to)
+                return 0.0 if lo <= x <= hi else min(abs(x - lo), abs(x - hi))
+            seg = min(fit.segments, key=gap)
+            out.append(times[i] - (seg.slope_s_per_mm * x + seg.intercept_s))
+        return out
 
     def has_rupture_speed(self) -> bool:
         return self.rupture_speed is not None and bool(np.isfinite(self.rupture_speed))
@@ -772,6 +859,7 @@ class DynamicStrainArrivalPickerView(EventView):
             return
         names = self.channel_names()
         times = self.pick_times_s()
+        resid = self.residuals_s()
         self._filling_table = True
         try:
             self.table.delete(*self.table.get_children())
@@ -780,7 +868,8 @@ class DynamicStrainArrivalPickerView(EventView):
                 self.table.insert("", "end", iid=str(i), values=(
                     names[i] if i < len(names) else f"ch {i}", _ms(self.locations[i]),
                     _ms(times[i] * 1e3, 5) if shown else "", CHECK if shown else "",
-                    CHECK if self.fitting_channels[i] else ""))
+                    CHECK if self.fitting_channels[i] else "",
+                    f"{resid[i] * 1e6:+.3g}" if shown and math.isfinite(resid[i]) else ""))
             if 0 <= self.channel < len(self.picked_idx):
                 self.table.selection_set(str(self.channel))
                 self.table.see(str(self.channel))
@@ -843,7 +932,7 @@ class DynamicStrainArrivalPickerView(EventView):
     # --------------------------------------------------------------- status
     def current_state(self) -> tuple:
         return (tuple(int(i) for i in self.picked_idx), tuple(bool(v) for v in self.enabled_channels),
-                tuple(bool(v) for v in self.fitting_channels))
+                tuple(bool(v) for v in self.fitting_channels), self.front_mode_var.get())
 
     def update_status(self, message: Optional[str] = None) -> None:
         """The status line: a message, then whether the picks are saved."""
@@ -874,7 +963,12 @@ class DynamicStrainArrivalPickerView(EventView):
             "locations": [float(v) for v in self.locations],
             # a degenerate fit has no speed: no nan and no stale value for the CZM fitter to pick up as Cf
             "rupture_speed": float(self.rupture_speed) if self.has_rupture_speed() else None,
+            "front_mode": self.front_mode_var.get(),
         }
+        if self.front_fit is not None:
+            front = self.front_fit.as_dict()
+            front["use"] = [i in self.fit_channels() for i in range(len(self.picked_idx))]
+            arrivals["front"] = front
         write_arrivals(block, arrivals, self.event)
         self.saved_state = self.current_state()
         self.app.refresh_tree()

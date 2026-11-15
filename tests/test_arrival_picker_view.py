@@ -601,3 +601,103 @@ def test_mechanical_traces_can_be_hidden(app_with_strain, view):
             other.on_close()
     finally:
         DynamicStrainArrivalPickerView.show_mechanical_default = True
+
+
+# ---------------------------------------------------------- rupture front
+def add_bilateral_record(event, positions_x, x0, t_trig, fs=200e3, speed=1500.0):
+    """A PZT record whose onsets leave ``x0`` both ways at ``speed`` m/s."""
+    from labquake_explorer.data.channels import channel_array, positions_table
+    time = t_trig - 0.05 + np.arange(int(0.3 * fs)) / fs
+    raw = np.zeros((len(positions_x), time.size))
+    onsets = []
+    for i, x in enumerate(positions_x):
+        onsets.append(t_trig + abs(x - x0) * 1e-3 / speed)
+        raw[i] = 0.5 * (1.0 + np.tanh((time - onsets[-1]) / 2e-5))
+    names = [f"pzt_{i + 1}" for i in range(len(positions_x))]
+    pos = positions_table(names, {n: (x, 100.0, 50.0) for n, x in zip(names, positions_x)})
+    event.setdefault("waveform", {})["elsys"] = channel_array(raw, names, unit="V", positions=pos, time=time,
+                                                              sample_rate=fs, block=3, trigger_time=t_trig,
+                                                              filename="elsys.tpc5")
+    return time, onsets
+
+
+XS = [50.0, 130.0, 210.0, 290.0, 370.0, 450.0]
+
+
+def test_bilateral_front_with_its_apex_and_residuals(app):
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    time, onsets = add_bilateral_record(event, XS, 250.0, t_trig)
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        for i, t in enumerate(onsets):
+            view.set_pick(i, int(np.argmin(np.abs(time - t))), refit=False)
+        view.update_fitted_line()
+        # one line averages the two directions into a meaningless speed
+        assert view.front_fit.mode == "single" and len(view.front_fit.segments) == 1
+        view.front_mode_var.set("bilateral")
+        view.update_fitted_line()
+        fit = view.front_fit
+        assert fit.valid and len(fit.segments) == 2
+        assert fit.split_x_mm == pytest.approx(250.0, abs=10.0)
+        speeds = sorted(seg.velocity_m_s for seg in fit.segments)
+        assert speeds[0] == pytest.approx(-1500.0, rel=0.05) and speeds[1] == pytest.approx(1500.0, rel=0.05)
+        assert "fronts start at x = " in view.front_text_var.get() and "towards -x" in view.front_text_var.get()
+        assert len(view.front_lines) == 5                      # two lines, two speed labels, the apex
+        # residuals within a sample or two of the hinge
+        resid = view.residuals_s()
+        assert max(abs(r) for r in resid) < 2.5 / 200e3
+        assert view.table.item("0", "values")[5] != ""
+        # Cf keeps its definition: one line through the same picks
+        assert np.isfinite(view.rupture_speed) and view.fitted_line is None
+        assert view.status_var.get().endswith("not saved")
+        view.save()
+        rec = event["waveform"]["elsys"]["arrivals"]
+        assert rec["front_mode"] == "bilateral" and rec["front"]["valid"] is True
+        assert len(rec["front"]["segments"]) == 2 and rec["front"]["use"] == [True] * 6
+        assert view.status_var.get().endswith("saved")
+        view.front_mode_var.set("single")
+        view.update_fitted_line()
+        assert view.status_var.get().endswith("differs from the saved record")
+    finally:
+        view.on_close()
+    view = DynamicStrainArrivalPickerView(app, 0, 1)               # the mode comes back with the record
+    try:
+        assert view.front_mode_var.get() == "bilateral" and len(view.front_fit.segments) == 2
+    finally:
+        view.on_close()
+
+
+def test_the_front_survives_an_hdf5_round_trip_in_both_layouts(app_with_strain, tmp_path, app_from_file):
+    app = app_with_strain
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    add_bilateral_record(event, XS, 250.0, t_trig)
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        view.magic()
+        view.front_mode_var.set("bilateral")
+        view.update_fitted_line()
+        view.save()                                                # the PSU strain record
+        strain_front = view.front_fit.as_dict()
+        assert event["strain"]["arrivals"]["front_mode"] == "bilateral"
+        assert "front_mode" not in event["strain"]["original"]   # the historical keys stay where they were
+        view.record_combobox.set("waveform/elsys")
+        view.on_record_selected()
+        view.magic()
+        view.save()                                                # the PZT record, single
+    finally:
+        view.on_close()
+    path = tmp_path / "front.h5"
+    app.data_manager.save_file(path)
+    reopened = app_from_file(path)
+    view = DynamicStrainArrivalPickerView(reopened, 0, 1)
+    try:
+        assert view.record_key == "strain" and view.front_mode_var.get() == "bilateral"
+        assert view.front_fit.as_dict()["split_x_mm"] == pytest.approx(strain_front["split_x_mm"])
+        assert view.status_var.get().endswith("saved")
+        view.record_combobox.set("waveform/elsys")
+        view.on_record_selected()
+        assert view.front_mode_var.get() == "single" and view.status_var.get().endswith("saved")
+    finally:
+        view.on_close()

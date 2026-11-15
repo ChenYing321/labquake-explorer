@@ -253,14 +253,16 @@ and PZT picks never overwrite each other:
 | `arrival_time` | the picked arrival times (s, run clock), read by the PZT view's "picked arrival" trigger |
 | `enabled_channels`, `fitting_channels` | one bool per channel: shown, and used in the `Cf` fit |
 | `locations` | sensor position along the fault (mm) per channel, from the record's `positions` table |
-| `rupture_speed` | fitted `Cf` in m/s; absent when the picks define no line |
+| `rupture_speed` | fitted `Cf` in m/s: one line `time = slope * location` through the fitted picks, `Cf = -1 / slope` (the sign of the published analyses); absent when the picks define no line |
+| `front_mode`, `front` | the rupture front through the same picks, fitted as in `slip_analysis` (`slip_profile.fit_front`): `single` or `bilateral` (two lines meeting at a fitted apex), and `FrontFit.as_dict()` (`valid`, `reason`, `split_x_mm` and `t0_s` of the apex relative to the event time, `segments` with `velocity_m_s` **positive towards +x**, `r2` and `resolved`) plus `use`, the channels fitted. Records saved before these keys open in `single` |
 
 The CZM fitter takes its default `Cf` from the strain record's `arrivals`.
 The PSU `strain` layout keeps its historical keys (`strain/original/picked_idx`,
 `strain/original/rupture_arrival_time`, `strain/enabled_channels`,
 `strain/fitting_channels`, `strain/locations`, and `rupture_speed` at the
-event level); `sources.read_arrivals(block, event)` and `write_arrivals`
-hide the difference from the views.
+event level) and puts the keys without a historical place (`front_mode`,
+`front`) in `strain['arrivals']`; `sources.read_arrivals(block, event)` and
+`write_arrivals` hide the difference from the views.
 
 ### `czm_parms` (CZMFitterView, no version)
 
