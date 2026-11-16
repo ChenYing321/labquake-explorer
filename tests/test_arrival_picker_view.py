@@ -744,3 +744,64 @@ def test_an_event_without_picks_in_the_set_starts_from_its_last_save(app, tmp_pa
     app.data_manager.save_file(tmp_path / "template.h5")
     reopened = Picker(app_from_file(tmp_path / "template.h5"), 0, 3)
     assert reopened.filter_kind() == tf.KIND_OFF and reopened.fitting_channels == [True, True, True, False]
+
+
+def test_search_window_fit_the_patch_and_the_choice_carried_to_the_next_event(app):
+    from labquake_explorer.data.settings import get_setting, set_setting
+    xs = [100.0, 200.0, 300.0, 400.0, 500.0]
+    for j in (2, 1):                                                   # event 1's time axis kept
+        event = app.data_manager.get_data(f"runs/[0]/events/[{j}]")
+        time, t_trig = add_pzt_record(event, xs, noise=0.01)
+        late = 3.0 * np.exp(-0.5 * ((time - (t_trig + 0.05)) / 2e-5) ** 2)       # a larger burst 50 ms later
+        event["waveform"]["elsys"]["data"] = event["waveform"]["elsys"]["data"] + late
+    view = Picker(app, 0, 1)
+    # D: the patch from the experiment fits only the sensors on it; no patch, a message
+    view.fit_the_patch()
+    assert "no patch edges" in view.status_var.get() and view.fitting_channels == [True] * 5
+    set_setting(app.data_manager.data, [450.0, 150.0], "fault", "patch_x_mm")
+    view.set_shown(1, False)
+    view.fit_the_patch()
+    assert view.fitting_channels == [False, True, True, True, False]
+    assert view.enabled_channels == [True] * 5 and "fitting the 3 sensors on the patch (150 to 450 mm)" in view.status_var.get()
+    # B: the whole record takes the early burst; the range shown, the arrivals
+    view.auto_method_var.set("peak")
+    view.auto_pick()
+    t_event = float(view.event["event_time"])
+    assert all(abs(view.relative_time_s()[k] - (t_trig + 0.05 - t_event)) < 1e-4 for k in view.picked_idx)
+    view.ax_wave.set_xlim((t_trig - t_event - 0.002) * 1e3, (t_trig - t_event + 0.003) * 1e3)
+    view.use_range_shown()
+    assert float(view.search_from_var.get()) == pytest.approx((t_trig - t_event - 0.002) * 1e3, rel=1e-3)
+    view.auto_method_var.set("difference from the noise")
+    view.auto_pick()
+    onsets = [t_trig + (x - xs[0]) * 1e-3 / 1500.0 for x in xs]
+    assert all(abs(time[view.picked_idx[i]] - onsets[i]) < 1e-4 for i in range(5))
+    assert abs(view.rupture_speed) == pytest.approx(1500.0, rel=0.1)
+    assert "shortened to end at the search window's start" not in view.noise_note_var.get()
+    view.search_from_var.set(f"{(t_trig - t_event - 0.03) * 1e3:g}")          # before the noise's end: shortened
+    view.auto_pick()
+    assert "shortened" in view.noise_note_var.get()
+    view.search_from_var.set("x")
+    assert view.auto_pick() is None and "search 'x' is not a time in ms" in view.status_var.get()
+    view.search_from_var.set("5")
+    view.search_to_var.set("1")
+    assert view.auto_pick() is None and "start before it ends" in view.status_var.get()
+    view.search_from_var.set(f"{(t_trig - t_event - 0.002) * 1e3:.4g}")
+    view.search_to_var.set(f"{(t_trig - t_event + 0.003) * 1e3:.4g}")
+    view.auto_pick()
+    view.save()
+    auto = read_arrivals(view.event["waveform"]["elsys"])["auto_pick"]
+    assert auto["search_from_s"] == pytest.approx(t_trig - t_event - 0.002, abs=1e-6)
+    tpl = get_setting(app.data_manager.data, "pick_arrivals", "sets", "default", "records", "elsys")["auto_pick"]
+    assert tpl["search_to_s"] == pytest.approx(t_trig - t_event + 0.003, abs=1e-6)
+    # the next event without picks: the set's last save (the search included); without a save, what was shown
+    view.search_from_var.set("")
+    view.set_event(2)
+    assert view.search_from_var.get() != "" and view.fitting_channels == [False, True, True, True, False]
+    view.on_close()
+    del app.data_manager.data["analysis"]["pick_arrivals"]
+    del app.data_manager.get_data("runs/[0]/events/[1]")["waveform"]["elsys"]["arrivals"]
+    view = Picker(app, 0, 1)
+    assert view.fitting_channels == [True] * 5
+    view.set_fitting(0, False)
+    view.set_event(2)
+    assert view.fitting_channels == [False, True, True, True, True]
