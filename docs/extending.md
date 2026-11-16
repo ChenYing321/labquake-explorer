@@ -100,6 +100,7 @@ wrote (`name`, `date`, `sample`, a `fault` description, ...):
 | `analysis['fault']` | `patch_x_mm = [from, to]`, the edges of the bare PMMA patch along the fault in mm (in either order), and `ends_x_mm = [from, to]`, where the fault (the sample) ends, both in the frame of the sensor positions. The Slip Distribution view draws them, cuts the slip profile at the ends and can save both; a notebook sets them with `experiment(..., analysis={'fault': {'patch_x_mm': [x0, x1], 'ends_x_mm': [0, 500]}})`. A value without two finite, different numbers is not drawn, and the view says it is unusable |
 | `analysis['medium']` | `rho_kg_m3`, `vp_m_s`, `vs_m_s` of the sample, as last saved by the PZT Spectrum view and offered to every new window |
 | `analysis['pzt_spectrum']` | per result set (see the `spectrum` schema), `sets[<name>]['settings']` (the PZT Spectrum view's controls as last saved in that set: the keys of a `spectrum` record below plus `phase` and `radiation_coefficient`) and `sets[<name>]['sensors']` (per sensor, keyed by the channel's field name such as `pzt_1`, else `ch<k>`: the `calibration` table, `calibration_path`, `calibration_unit`, `calibration_db`, `calibration_divisor`, `t_star_s`, `distance_m`, `free_surface_factor`), and `current_set`, the set last saved, where a new window opens. Files written before result sets (2026-11) keep flat `settings` / `sensors`: they are read as the set `default` and moved on the next save or by the migration tool |
+| `analysis['pick_arrivals']` | `sets[<name>]['records'][<recorder>]`: what the Pick Arrivals view last saved in that pick set on that kind of record (`elsys`, `ni`, `strain`): `filter`, `auto_pick` (`method`, `threshold`, `smoothing_us`, and the search window's `search_from_s` / `search_to_s`), `front_mode`, and the channels `shown` and `fit` by name. An event without picks in the set starts from it; choosing the set on such an event takes these controls and keeps the picks on screen. `current_set`: the set saved last, where a new window opens (as `analysis['pzt_spectrum']['current_set']`) |
 
 Files saved earlier kept the patch edges and fault ends as top-level
 `patch_x_mm` / `fault_ends_x_mm` or as `fault = {'patch_x_mm': ...,
@@ -207,7 +208,7 @@ entry per sensor, in the order of `channels`, except `patch_x_mm`
 | `rate_filter_tabs`, `fault_ends_x_mm` | the windows of both windowed filter tabs (`savgol_window_s`, `boxcar_window_s`), whichever is used; the fault ends the profile was cut at (NaN when none; the experiment's `analysis['fault']['ends_x_mm']` wins when the view opens) |
 | `patch_x_mm` | the bare PMMA patch edges drawn, `[from, to]` (NaN when none). An event opens with the experiment's `analysis['fault']['patch_x_mm']` (see Run layout), else with this copy; edges typed in the view and not saved to the experiment stay as it moves between events. The copy counts towards "differs from the saved record" only while the experiment has no edges |
 | `profile` | slip profile fit (`labquake_explorer/analysis/slip_profile.py`): `model` (`quadratic`, `eaz` or `eaz_asymmetric`), `params`, `valid`, `reason`, `n` (the sensors fitted: those in `use` with a finite slip and, when weighted, a positive `sigma`), `weighted`, `r2`, `rms_um`, `tips_mm` (where the fitted profile reaches zero), `peak_x_mm`, `peak_um`, `at_bounds`, `unresolved` (the parameters the sensors do not pin down, and `tips` when a rupture edge is only bracketed), `ranges` (name to `[lo, hi]`, the values that fit equally well where known, NaN for an open end; `tip_minus`/`tip_plus` are the brackets of free edges, and an EAZ `D` that moves with a free `lambda` has a range without being listed), `fixed` (the parameters held at the user's values), `end_slip_um` (the profile at the two fault ends where it reaches them, else NaN), `settings` (every model tab's parameters: per model and name, `fit` false for a held one, `value` the held value, `min`/`max` the user's bounds, NaN for automatic), and `use` (the sensors chosen) |
-| `front` | rupture-front fit of `t_shift_s` (`t_i - event_time`) against `x`: `mode` (`single` or `bilateral`, below), `valid`, `reason`, `split_x_mm` and `t0_s` (bilateral: the apex and its time relative to `event_time`; NaN when there is none), `segments` (`x_from`, `x_to`, `n`, `slope_s_per_mm`, `intercept_s` at x = 0 relative to `event_time`, `velocity_m_s` positive towards +x and infinite for a flat line, `r2`, `resolved` false when the front crosses the segment within one sample, and `min_speed_m_s`, the speed of crossing it in one sample: the lower bound of an unresolved one), `use` and `use_auto` (while true, `use` follows the pick flags: the sensors whose `t_i` is doubtful, flagged `pick at search edge`, `weak rate peak` or `no rate peak`, are left out) |
+| `front` | rupture-front fit of `t_shift_s` (`t_i - event_time`) against `x`: `mode` (`unilateral` or `bilateral`, below; records before 0.3.0 say `single`, read as `unilateral`), `valid`, `reason`, `split_x_mm` and `t0_s` (bilateral: the apex and its time relative to `event_time`; NaN when there is none), `segments` (`x_from`, `x_to`, `n`, `slope_s_per_mm`, `intercept_s` at x = 0 relative to `event_time`, `velocity_m_s` positive towards +x and infinite for a flat line, `r2`, `resolved` false when the front crosses the segment within one sample, and `min_speed_m_s`, the speed of crossing it in one sample: the lower bound of an unresolved one), `use` and `use_auto` (while true, `use` follows the pick flags: the sensors whose `t_i` is doubtful, flagged `pick at search edge`, `weak rate peak` or `no rate peak`, are left out) |
 | `auto_windows` | present when the Auto windows box placed windows (`labquake_explorer/analysis/fit_windows.py`), version 1: `settings` (the keyword arguments of `fit_windows.auto_windows` used: `width_s`, `min_start_s`, `max_start_s`, `step_s`, `plateau_tol_um`, `plateau_span_s`, `background_factor`, `rate_smoothing_s`, `min_after_s`, `max_decay_s`, `creep_ratio`, `onset_fraction`, `before_gap_s`, `onset_search_s`, `event_margin_s`) and, per sensor, `applied` (its `fit_before_s` / `fit_after_s` are the ones placed; false once a window is moved by hand. Such a sensor is manual, and so is every sensor of a manual event (one saved without `auto_windows`). Running the box again keeps them unless its choice says otherwise: `keep all manual windows` (the default), `keep manual events only` (the manual sensors of events with auto windows are placed again) or `overwrite everything`; the confirmation counts what is kept and what is overwritten), `kind` (`plateau`: the after line levels off; `decay`: the after window starts where the slip rate, averaged over `rate_smoothing_s`, falls to `background_factor` times the background rate; "" when not applied), `flags` (`"; "`-joined, each starting `auto:`; those ending "check the windows" or "check the after window" ask for a check by hand; `auto: negative slip, check the windows` is set from the slip measured with the placed windows and is not read back from the record), `creep_ratio` (the background rate over the slip rate at `t_i`; above `settings.creep_ratio` the sensor is flagged) and `background_rate_um_s` (the slope of the before line). The slip itself is measured as for windows placed by hand |
 
 Profile models, with `x` in mm: `quadratic` is `max(0, c0 + c1 x + c2 x^2)`,
@@ -227,7 +228,7 @@ value that puts `r_joint` at the nearest sensor fits equally), the extent and th
 edges when no more sensors slip than the model has parameters.
 
 The front is fitted to the `t_i` of the sensors in `use`, with the event's
-sampling interval. `single` is one line. `bilateral` is a hinge, two lines that
+sampling interval. `unilateral` is one line. `bilateral` is a hinge, two lines that
 meet at a fitted apex (`split_x_mm`, `t0_s`): least squares over the apex
 position, at least four sensors and two on each side; with fewer sensors, two
 lines through the earliest one; one line when both sides run the same way.
@@ -242,27 +243,49 @@ bound typed replaces the automatic one (`bounds=...`), and with every
 parameter held the profile is drawn without a fit. Held parameters count as
 resolved.
 
-### `arrivals` (Pick Arrivals, per record, version 1)
+### `arrivals` (Pick Arrivals, per record, version 2)
 
 Pick Arrivals works on one full-rate record at a time (the Record selector:
 `waveform/elsys`, `waveform/ni`, ... or the PSU `strain`), and its results
 belong to that record, `event['waveform'][recorder]['arrivals']`, so strain
-and PZT picks never overwrite each other:
+and PZT picks never overwrite each other. A record keeps named pick sets
+(hand picks, onset picks, peak picks, the picks of another burst):
+
+```
+{"version": 2, "current": "<set saved last>", "sets": {"<name>": {<record>}}}
+```
+
+A version-1 `arrivals` (the record itself, with its own `version`) is read as
+the set `default` and becomes version 2 on the next save or with
+`data.migrate`. The set saved last is the record's `current` one, which
+`read_arrivals(block, event)` returns when no set is named, so the CZM
+fitter's `Cf` and PZT Spectrum's "picked arrival" trigger follow it. As in
+PZT Spectrum, a new Pick Arrivals window opens on the set saved last in the
+experiment, `analysis['pick_arrivals']['current_set']`, else on the record's
+current set; what an event without picks in a set starts from is kept in
+`analysis['pick_arrivals']` too (see Run layout). A set name is non-empty and has no `/`. Each set's record:
 
 | key | meaning |
 |---|---|
 | `picked_idx` | picked arrival sample index per channel on the record's `time` |
 | `arrival_time` | the picked arrival times (s, run clock), read by the PZT view's "picked arrival" trigger |
 | `enabled_channels`, `fitting_channels` | one bool per channel: shown, and used in the `Cf` fit |
-| `locations` | sensor position along the fault (mm) per channel, from the record's `positions` table |
-| `rupture_speed` | fitted `Cf` in m/s; absent when the picks define no line |
+| `locations` | sensor position along the fault (mm) per channel, from the record's `positions` table; `NaN` for a channel without one (an NI record's pressure or LVDT channel), which the view hides, draws past the last sensor when shown, and never fits |
+| `filter` | the trace filter the picks were made on (`labquake_explorer/analysis/trace_filter.py`): `kind` `off`, `savgol` (`window_samples`, `polyorder`), or a Butterworth `lowpass`, `highpass` or `bandpass` (`order`, `zero_phase`, and `low_hz` and/or `high_hz`); `off` when the settings shown could not filter the record. Records saved before this key open with the filter left as it was |
+| `rupture_speed` | fitted `Cf` in m/s: one line `time = slope * location` through the fitted picks, `Cf = -1 / slope` (the sign of the published analyses); absent when the picks define no line |
+| `front_mode`, `front` | the rupture front through the same picks, fitted as in `slip_analysis` (`slip_profile.fit_front`): `unilateral` or `bilateral` (two lines meeting at a fitted apex; `single` in records before 0.3.0, read as `unilateral`), and `FrontFit.as_dict()` (`valid`, `reason`, `split_x_mm` and `t0_s` of the apex relative to the event time, `segments` with `velocity_m_s` **positive towards +x**, `r2` and `resolved`) plus `use`, the channels fitted. Records saved before these keys open in `unilateral` |
+| `auto_pick` | present once "Auto pick" placed the picks (`labquake_explorer/analysis/arrival_picks.py`): `method` (`difference` from the noise level, `slope`, or `peak`, the largest departure from the noise level), `threshold` (times the noise's spread, 1.4826 MAD), `smoothing_samples` (the slope's moving average), `noise_end_s` (the noise is the record before this time, relative to the event time: its trigger, else the event time, less a tenth of the record before it, else its first fifth), `filter` (as above, the traces it ran on), `search_from_s` / `search_to_s` when a search window was set (relative to the event time: the pick, and the walk back to the quiet stretch, stay inside it, and the noise ends no later than its start) and `flags` per channel (`weak onset: ...`, `onset at the end of the noise window`, `onset at the start of the search window`, ...; "" when fine, and cleared when that pick is moved by hand). The pick is the onset of the largest change: back from it to the last stretch of at least 10 samples below the threshold, so an oscillating arrival is picked at its start. `peak` takes the largest departure itself, and, like the other two, leaves a channel whose largest value is not above the threshold unpicked and flagged weak |
 
-The CZM fitter takes its default `Cf` from the strain record's `arrivals`.
-The PSU `strain` layout keeps its historical keys (`strain/original/picked_idx`,
-`strain/original/rupture_arrival_time`, `strain/enabled_channels`,
-`strain/fitting_channels`, `strain/locations`, and `rupture_speed` at the
-event level); `sources.read_arrivals(block, event)` and `write_arrivals`
-hide the difference from the views.
+The CZM fitter takes its default `Cf` from the strain record's current set.
+The PSU `strain` layout keeps its `default` set in the historical places
+(`strain/original/picked_idx`, `strain/original/rupture_arrival_time`,
+`strain/enabled_channels`, `strain/fitting_channels`, `strain/locations`, and
+`rupture_speed` at the event level), that set's further keys (`front_mode`,
+`front`, ...) in `strain['arrivals']['sets']['default']`, and every other set
+whole in `strain['arrivals']['sets']`. `sources.read_arrivals(block, event,
+set_name)`, `write_arrivals(block, arrivals, event, set_name)`,
+`arrival_sets(block)` and `current_arrival_set(block)` hide the difference
+from the views.
 
 ### `czm_parms` (CZMFitterView, no version)
 
@@ -580,7 +603,8 @@ paths, channel maps, the calibration, the builders, plots, save.
 layouts above: run keys that were dropped, picks moved into
 `event_extraction`, events reduced to the processed channels plus
 `waveform/<recorder>` records (with `trigger_time` and `positions`), arrival
-picks under `arrivals`, `event_analysis` records at version 3, spectrum
+picks under `arrivals` (version 2: a version-1 record becomes the pick set
+`default`, in the PSU `strain` layout too), `event_analysis` records at version 3, spectrum
 stores at version 2 (result sets) with the flat PZT Spectrum settings of
 `analysis['pzt_spectrum']` moved into its `default` set. The PSU
 `strain` layout is left as it is. The patch edges and fault ends an earlier

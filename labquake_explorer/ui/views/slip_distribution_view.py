@@ -49,7 +49,7 @@ not pinned is given, and drawn on the zero line, as the bracket it lies in
 (``beyond`` the last sensor when it is open); markers mark only the edges
 that are pinned.
 
-The front is one line (``single``) or, by default, a hinge of two lines that
+The front is one line (``unilateral``) or, by default, a hinge of two lines that
 meet at a fitted apex (``bilateral``: at least four sensors; with fewer, two
 lines through the earliest sensor; one line when both sides run the same way).
 The text gives the apex and its time, where the fronts start (diverging) or
@@ -291,7 +291,7 @@ def segment_text(seg: sprof.FrontSegment) -> str:
 def apex_text(fit: sprof.FrontFit) -> Optional[str]:
     """Where a bilateral front starts (two lines leaving the apex), or where its two
     fronts meet (two lines running into it), with the time there; for a front that
-    runs one way, its earliest point.  None without an apex (NaN, single mode) or
+    runs one way, its earliest point.  None without an apex (NaN, unilateral mode) or
     when no side moves."""
     if fit.mode != "bilateral" or not fit.segments:
         return None
@@ -778,7 +778,7 @@ class SlipDistributionView(EventView):
         self.front_mode_combobox.set(DEFAULT_FRONT_MODE)
         self.front_mode_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
         self.front_mode_combobox.bind("<<ComboboxSelected>>", lambda e: self.on_front_settings())
-        ttk.Label(frame, text="single: one line; bilateral: two lines that\nmeet at a fitted apex",
+        ttk.Label(frame, text="unilateral: one line; bilateral: two lines\nthat meet at a fitted apex",
                   foreground="#606060", justify="left").grid(row=1, column=0, columnspan=2, padx=4, sticky="w")
         self.front_use_mb = self._use_menu(frame, 2)
         self.front_text_var = tk.StringVar(master=self, value="")
@@ -1049,7 +1049,7 @@ class SlipDistributionView(EventView):
             self.restore_profile_params(profile.get("settings"))
         self.profile_use = _bools(profile.get("use") if isinstance(profile, dict) else None, n, True)
         if isinstance(front, dict):
-            mode = str(front.get("mode", DEFAULT_FRONT_MODE))
+            mode = sprof.front_mode_name(front.get("mode", DEFAULT_FRONT_MODE))
             self.front_mode_combobox.set(mode if mode in sprof.FRONT_MODES else DEFAULT_FRONT_MODE)
             self.front_use_auto = bool(np.asarray(front.get("use_auto", True)).ravel()[0])
             self.front_use = _bools(front.get("use"), n, True)
