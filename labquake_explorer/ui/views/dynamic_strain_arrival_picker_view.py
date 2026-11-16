@@ -317,12 +317,12 @@ class DynamicStrainArrivalPickerView(EventView):
         frame = ttk.LabelFrame(left, text="Rupture front")
         frame.pack(fill="x", pady=4)
         ttk.Label(frame, text="Fit:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
-        self.front_mode_var = tk.StringVar(master=self, value="single")
+        self.front_mode_var = tk.StringVar(master=self, value="unilateral")
         self.front_mode_combobox = ttk.Combobox(frame, textvariable=self.front_mode_var, state="readonly",
                                                 width=10, values=list(sprof.FRONT_MODES))
         self.front_mode_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
         self.front_mode_combobox.bind("<<ComboboxSelected>>", lambda e: self.update_fitted_line(), add="+")
-        ttk.Label(frame, text="single: one line; bilateral: two lines that meet at a fitted apex",
+        ttk.Label(frame, text="unilateral: one line; bilateral: two lines that meet at a fitted apex",
                   foreground="#606060", wraplength=TEXT_WRAP_PX, justify="left").grid(
             row=1, column=0, columnspan=2, padx=4, sticky="w")
         self.front_text_var = tk.StringVar(master=self, value="")
@@ -521,8 +521,8 @@ class DynamicStrainArrivalPickerView(EventView):
         if entry is None:
             return False
         self.restore_filter(entry.get("filter"))
-        if entry.get("front_mode") in sprof.FRONT_MODES:
-            self.front_mode_var.set(entry["front_mode"])
+        if entry.get("front_mode") is not None and sprof.front_mode_name(entry["front_mode"]) in sprof.FRONT_MODES:
+            self.front_mode_var.set(sprof.front_mode_name(entry["front_mode"]))
         auto = entry.get("auto_pick")
         if isinstance(auto, dict):
             if auto.get("method") in ap.METHODS:
@@ -633,8 +633,8 @@ class DynamicStrainArrivalPickerView(EventView):
         else:
             self.restore_filter(saved.get("filter"))
             mode = saved.get("front_mode")
-            mode = str(np.asarray(mode).ravel()[0]) if mode is not None and np.size(mode) else "single"
-            self.front_mode_var.set(mode if mode in sprof.FRONT_MODES else "single")
+            mode = sprof.front_mode_name(mode) if mode is not None and np.size(mode) else "unilateral"
+            self.front_mode_var.set(mode if mode in sprof.FRONT_MODES else "unilateral")
         locations = saved.get("locations")
         if locations is not None and len(locations) == n and np.isfinite(np.asarray(locations, float)).any():
             xs = [float(v) for v in locations]
@@ -1179,7 +1179,7 @@ class DynamicStrainArrivalPickerView(EventView):
                 and (i >= len(self.placed) or self.placed[i])]
 
     def update_fitted_line(self):
-        """Cf from one line through the fitted picks, and the rupture front (single
+        """Cf from one line through the fitted picks, and the rupture front (unilateral
         or bilateral) through them, drawn with each segment's speed."""
         for artist in self.front_lines:
             try:
@@ -1225,7 +1225,7 @@ class DynamicStrainArrivalPickerView(EventView):
         if math.isfinite(fit.split_x_mm) and math.isfinite(fit.t0_s) and fit.mode == "bilateral":
             self.front_lines.append(ax.plot([1e3 * fit.t0_s], [fit.split_x_mm], "D", mfc="none", mec=FRONT_COLOR,
                                             mew=1.4, ms=8, zorder=6)[0])
-        if fit.mode == "single" and self.has_rupture_speed():
+        if fit.mode == "unilateral" and self.has_rupture_speed():
             self.fitted_line = self.front_lines[0]
 
     def front_text(self) -> str:

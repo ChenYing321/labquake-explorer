@@ -128,11 +128,11 @@ def test_fit_options_and_failures():
     assert {"r2", "rms_um", "tips_mm", "peak_x_mm", "peak_um", "n", "weighted", "valid", "reason", "at_bounds"} <= set(d)
 
 
-def test_front_single_and_bilateral():
+def test_front_unilateral_and_bilateral():
     t = 0.02 + np.abs(X - 279.0) * 1e-3 / 50.0
-    single = sp.fit_front(X[4:], t[4:])
-    assert single.valid and single.segments[0].velocity_m_s == pytest.approx(50.0)
-    assert single.segments[0].r2 == pytest.approx(1.0)
+    one = sp.fit_front(X[4:], t[4:])
+    assert one.valid and one.segments[0].velocity_m_s == pytest.approx(50.0)
+    assert one.segments[0].r2 == pytest.approx(1.0)
     both = sp.fit_front(X, t, mode="bilateral")
     assert both.split_x_mm == 279.0 and len(both.segments) == 2
     left, right = both.segments
@@ -383,3 +383,11 @@ def test_unusable_held_values_and_bounds(kwargs, reason):
     assert not fit.valid and reason in fit.reason
     with pytest.raises(ValueError, match="no parameter"):
         sp.fit_profile(X, sp.eaz_profile(X, 100.0, 270.0, 230.0, 0.6), model="eaz", fixed={"c0": 1.0})
+
+
+def test_single_is_read_as_unilateral():
+    assert sp.FRONT_MODES == ("unilateral", "bilateral")
+    assert sp.front_mode_name("single") == "unilateral" and sp.front_mode_name(np.array("single")) == "unilateral"
+    assert sp.front_mode_name(b"bilateral") == "bilateral"
+    fit = sp.fit_front([0.0, 100.0, 200.0], [0.0, 1e-4, 2e-4], mode="single")       # records before 0.3.0
+    assert fit.mode == "unilateral" and fit.valid and len(fit.segments) == 1

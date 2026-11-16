@@ -532,7 +532,7 @@ def test_bilateral_front_is_kept_per_record_through_hdf5(app_with_strain, tmp_pa
         view.set_pick(i, int(np.argmin(np.abs(time - t_trig - abs(x - 250.0) * 1e-3 / 1500.0))), refit=False)
     view.update_fitted_line()
     # one line averages the two directions into a meaningless speed
-    assert view.front_fit.mode == "single" and len(view.front_fit.segments) == 1
+    assert view.front_fit.mode == "unilateral" and len(view.front_fit.segments) == 1
     view.front_mode_var.set("bilateral")
     view.update_fitted_line()
     fit = view.front_fit
@@ -552,13 +552,13 @@ def test_bilateral_front_is_kept_per_record_through_hdf5(app_with_strain, tmp_pa
     assert rec["front_mode"] == "bilateral" and rec["front"]["valid"] is True
     assert len(rec["front"]["segments"]) == 2 and rec["front"]["use"] == [True] * 6
     assert view.status_var.get().endswith("saved")
-    view.front_mode_var.set("single")
+    view.front_mode_var.set("unilateral")
     view.update_fitted_line()
     assert view.status_var.get().endswith("differs from the saved record")
 
-    # the mode belongs to the record: the strain record comes up single
+    # the mode belongs to the record: the strain record comes up unilateral
     _select_record(view, "strain")
-    assert view.front_mode_var.get() == "single"
+    assert view.front_mode_var.get() == "unilateral"
     view.pick_peaks()
     view.front_mode_var.set("bilateral")
     view.update_fitted_line()
@@ -805,3 +805,13 @@ def test_search_window_fit_the_patch_and_the_choice_carried_to_the_next_event(ap
     view.set_fitting(0, False)
     view.set_event(2)
     assert view.fitting_channels == [False, True, True, True, True]
+
+
+def test_a_record_saved_with_single_opens_unilateral(app_with_strain, view):
+    view.front_mode_var.set("bilateral")
+    view.pick_peaks()
+    view.save()
+    view.event["strain"]["arrivals"]["sets"]["default"]["front_mode"] = "single"     # as saved before 0.3.0
+    view.on_close()
+    reopened = Picker(app_with_strain, 0, 1)
+    assert reopened.front_mode_var.get() == "unilateral" and reopened.front_fit.mode == "unilateral"
