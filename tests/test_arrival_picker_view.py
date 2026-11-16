@@ -54,10 +54,9 @@ def _select_record(view, key):
 
 def _czm_cf(app):
     czm = CZMFitterView(app, 0, 1)
-    try:
-        return czm.Cf.get()
-    finally:
-        czm.on_close()
+    cf = czm.Cf.get()
+    czm.on_close()
+    return cf
 
 
 def _mouse(view, x_ms, y_mm):
@@ -284,12 +283,9 @@ def test_trace_filters_redraw_the_traces_and_are_saved(app_with_strain, view, tm
     path = tmp_path / "filter.h5"
     app_with_strain.data_manager.save_file(path)
     reopened = Picker(app_from_file(path), 0, 1)
-    try:
-        assert reopened.filter_kind() == tf.KIND_BANDPASS and reopened.filter_order_var.get() == "3"
-        assert float(reopened.filter_low_khz.get()) == 0.5 and float(reopened.filter_high_khz.get()) == 2.0
-        assert reopened.zero_phase_var.get() is False and reopened.status_var.get().endswith("saved")
-    finally:
-        reopened.on_close()
+    assert reopened.filter_kind() == tf.KIND_BANDPASS and reopened.filter_order_var.get() == "3"
+    assert float(reopened.filter_low_khz.get()) == 0.5 and float(reopened.filter_high_khz.get()) == 2.0
+    assert reopened.zero_phase_var.get() is False and reopened.status_var.get().endswith("saved")
 
 
 def test_picks_dragged_typed_zoomed_and_mechanical_panels_hidden(app_with_strain, view, monkeypatch):
@@ -437,13 +433,10 @@ def test_pzt_record_defaults_per_record_save_and_readers(app):
     # the CZM fitter's Cf and the PZT view's "picked arrival" trigger come from the record's arrivals
     assert _czm_cf(app) == pytest.approx(abs(rec["rupture_speed"]))
     pv = PZTSpectrumView(app, 0, 1)
-    try:
-        pv.set_channel(2)
-        pv.trigger_combobox.set(TRIGGER_PICKED)
-        assert pv.compute(), pv.status_var.get()
-        assert pv.window.trigger_time == pytest.approx(time[rec["picked_idx"][2]])
-    finally:
-        pv.on_close()
+    pv.set_channel(2)
+    pv.trigger_combobox.set(TRIGGER_PICKED)
+    assert pv.compute(), pv.status_var.get()
+    assert pv.window.trigger_time == pytest.approx(time[rec["picked_idx"][2]])
 
 
 def test_records_keep_their_own_picks_and_entry_defaults(app_with_strain):
@@ -496,42 +489,37 @@ def test_a_record_on_an_offset_with_unplaced_channels_and_no_trigger(app, tmp_pa
     event.setdefault("waveform", {})["ni"] = channel_array(raw, names, unit="V", positions=pos, time=time,
                                                            sample_rate=fs, filename="ni.tdms")
     view = Picker(app, 0, 1)
-    try:
-        # the unplaced channels are hidden, not fitted, and parked past the last sensor
-        assert view.record_key == "waveform/ni" and view.placed == [False, False, True, True, True, True]
-        assert view.locations[2:] == xs and view.locations[:2] == [279.0, 341.0]
-        assert view.enabled_channels == view.placed and view.fitting_channels == view.placed
-        assert [view.table.item(str(i), "values")[1] for i in range(2)] == ["–", "–"]
-        # no trigger: the picks start at the event time and the noise ends before it
-        assert view.picked_idx[2] == int(np.argmin(np.abs(time - t_event)))
-        assert "before the event time" in view.noise_note_var.get()
-        lo, hi = view.ax_wave.get_ylim()
-        for i in range(2, 6):                                     # each trace from its baseline, in its own band
-            y = view.lines[i].get_data()[1]
-            assert abs(np.median(y[:100]) - xs[i - 2]) < 1.0
-            assert xs[i - 2] - 62.0 <= y.min() and y.max() <= xs[i - 2] + 62.0
-            assert hi < y.min() and y.max() < lo
-        view.auto_pick()
-        assert abs(view.rupture_speed) == pytest.approx(50.0, rel=0.1)
-        # an unplaced channel shown and asked to fit is drawn but kept out of the fit
-        view.set_shown(0, True)
-        view.set_fitting(0, True)
-        assert view.lines[0] is not None and 0 not in view.fit_channels()
-        assert "no position" in view.status_var.get()
-        view.save()
-        rec = event["waveform"]["ni"]["arrivals"]
-        assert np.isnan(rec["locations"][:2]).all() and rec["locations"][2:] == xs
-    finally:
-        view.on_close()
+    # the unplaced channels are hidden, not fitted, and parked past the last sensor
+    assert view.record_key == "waveform/ni" and view.placed == [False, False, True, True, True, True]
+    assert view.locations[2:] == xs and view.locations[:2] == [279.0, 341.0]
+    assert view.enabled_channels == view.placed and view.fitting_channels == view.placed
+    assert [view.table.item(str(i), "values")[1] for i in range(2)] == ["–", "–"]
+    # no trigger: the picks start at the event time and the noise ends before it
+    assert view.picked_idx[2] == int(np.argmin(np.abs(time - t_event)))
+    assert "before the event time" in view.noise_note_var.get()
+    lo, hi = view.ax_wave.get_ylim()
+    for i in range(2, 6):                                     # each trace from its baseline, in its own band
+        y = view.lines[i].get_data()[1]
+        assert abs(np.median(y[:100]) - xs[i - 2]) < 1.0
+        assert xs[i - 2] - 62.0 <= y.min() and y.max() <= xs[i - 2] + 62.0
+        assert hi < y.min() and y.max() < lo
+    view.auto_pick()
+    assert abs(view.rupture_speed) == pytest.approx(50.0, rel=0.1)
+    # an unplaced channel shown and asked to fit is drawn but kept out of the fit
+    view.set_shown(0, True)
+    view.set_fitting(0, True)
+    assert view.lines[0] is not None and 0 not in view.fit_channels()
+    assert "no position" in view.status_var.get()
+    view.save()
+    rec = event["waveform"]["ni"]["arrivals"]
+    assert np.isnan(rec["locations"][:2]).all() and rec["locations"][2:] == xs
+    view.on_close()
     path = tmp_path / "ni.h5"
     app.data_manager.save_file(path)
     view = Picker(app_from_file(path), 0, 1)
-    try:
-        _select_record(view, "waveform/ni")
-        assert view.placed == [False, False, True, True, True, True] and view.locations[2:] == xs
-        assert view.status_var.get().endswith("saved")
-    finally:
-        view.on_close()
+    _select_record(view, "waveform/ni")
+    assert view.placed == [False, False, True, True, True, True] and view.locations[2:] == xs
+    assert view.status_var.get().endswith("saved")
 
 
 # ------------------------------------------------------------ rupture front
@@ -583,15 +571,12 @@ def test_bilateral_front_is_kept_per_record_through_hdf5(app_with_strain, tmp_pa
     path = tmp_path / "front.h5"
     app_with_strain.data_manager.save_file(path)
     view = Picker(app_from_file(path), 0, 1)
-    try:
-        assert view.record_key == "strain" and view.front_mode_var.get() == "bilateral"
-        assert view.front_fit.as_dict()["split_x_mm"] == pytest.approx(strain_split)
-        assert view.status_var.get().endswith("saved")
-        _select_record(view, "waveform/elsys")
-        assert view.front_mode_var.get() == "bilateral" and len(view.front_fit.segments) == 2
-        assert view.status_var.get().endswith("saved")
-    finally:
-        view.on_close()
+    assert view.record_key == "strain" and view.front_mode_var.get() == "bilateral"
+    assert view.front_fit.as_dict()["split_x_mm"] == pytest.approx(strain_split)
+    assert view.status_var.get().endswith("saved")
+    _select_record(view, "waveform/elsys")
+    assert view.front_mode_var.get() == "bilateral" and len(view.front_fit.segments) == 2
+    assert view.status_var.get().endswith("saved")
 
 
 # ---------------------------------------------------------------- auto pick
@@ -617,26 +602,23 @@ def test_auto_pick_methods_flags_and_hand_moves(app):
 
     event["waveform"]["elsys"]["data"][2] *= 0.0           # a dead channel: nothing to pick
     view = Picker(app, 0, 1)
-    try:
-        before = view.picked_idx[2]
-        picks = view.auto_pick()
-        assert picks[2].flag == ap.FLAG_WEAK and view.picked_idx[2] == before
-        assert view.table.item("2", "values")[6] == "weak onset"
-        assert "1 flagged (pzt_3: weak onset" in view.status_var.get()
-        view.save()
-        # reopening keeps the flag; a pick moved by hand clears it
-        view.on_close()
-        view = Picker(app, 0, 1)
-        assert view.auto_flags[2] == ap.FLAG_WEAK
-        view.set_pick(2, before + 10)
-        assert view.auto_flags[2] == "" and view.table.item("2", "values")[6] == ""
-        # unusable settings: the status says why and nothing moves
-        picks_now = list(view.picked_idx)
-        view.auto_threshold_var.set("0")
-        assert view.auto_pick() is None and "threshold must be > 0" in view.status_var.get()
-        view.auto_threshold_var.set("5")
-        view.auto_smoothing_var.set("x")
-        assert view.auto_pick() is None and "not a number" in view.status_var.get()
-        assert view.picked_idx == picks_now
-    finally:
-        view.on_close()
+    before = view.picked_idx[2]
+    picks = view.auto_pick()
+    assert picks[2].flag == ap.FLAG_WEAK and view.picked_idx[2] == before
+    assert view.table.item("2", "values")[6] == "weak onset"
+    assert "1 flagged (pzt_3: weak onset" in view.status_var.get()
+    view.save()
+    # reopening keeps the flag; a pick moved by hand clears it
+    view.on_close()
+    view = Picker(app, 0, 1)
+    assert view.auto_flags[2] == ap.FLAG_WEAK
+    view.set_pick(2, before + 10)
+    assert view.auto_flags[2] == "" and view.table.item("2", "values")[6] == ""
+    # unusable settings: the status says why and nothing moves
+    picks_now = list(view.picked_idx)
+    view.auto_threshold_var.set("0")
+    assert view.auto_pick() is None and "threshold must be > 0" in view.status_var.get()
+    view.auto_threshold_var.set("5")
+    view.auto_smoothing_var.set("x")
+    assert view.auto_pick() is None and "not a number" in view.status_var.get()
+    assert view.picked_idx == picks_now

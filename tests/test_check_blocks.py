@@ -6,12 +6,11 @@ import numpy as np
 import pytest
 
 from labquake_explorer.data import check_blocks as C
-from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.data.event_processor import EventProcessor
 from labquake_explorer.data.sources import Tpc5Source
 from labquake_explorer.preprocessing import run_from_sources
 from labquake_explorer.utils import tpc5
-from tests.synthetic import write_tpc5
+from tests.synthetic import load_manager, save_data, write_tpc5
 
 FS_TRIGGER, PRE, POST = 20_000.0, 0.02, 0.08              # trigger blocks: 2000 samples, 20 ms before the trigger
 TRIGGERS = (0.30, 0.80, 1.10, 1.60, 2.30, 2.35)            # file clock, blocks 2..7
@@ -45,15 +44,12 @@ def make_experiment(folder, suffix=".h5", event_fields=None):
     run["events"] = EventProcessor(path).extract_events(run, indices, window=0.15, pre=-WINDOW[0], post=WINDOW[1])
     run["event_extraction"] = {"version": 1, "event_indices": indices, "start_s": WINDOW[0], "end_s": WINDOW[1],
                                "n_events": len(indices)}
-    dm = DataManager()
-    dm.data = {"name": "t0001", "runs": [run, {"name": "run2", "time": np.arange(3.0)}]}
-    dm.save_file(path)
+    save_data({"name": "t0001", "runs": [run, {"name": "run2", "time": np.arange(3.0)}]}, path)
     return path
 
 
 def edit(path, change):
-    dm = DataManager()
-    dm.load_file(path)
+    dm = load_manager(path)
     change(dm.data)
     dm.save_file(path)
 
@@ -144,9 +140,7 @@ def test_a_block_touching_the_window_is_counted_as_the_reader_counts_it(tmp_path
     path = tmp_path / "t0001.h5"
     run["events"] = EventProcessor(path).extract_events(run, indices, window=0.15, pre=pre, post=post)
     run["event_extraction"] = {"version": 1, "event_indices": indices, "start_s": WINDOW[0], "end_s": WINDOW[1]}
-    dm = DataManager()
-    dm.data = {"name": "t0001", "runs": [run]}
-    dm.save_file(path)
+    save_data({"name": "t0001", "runs": [run]}, path)
     assert [e.get("waveform", {}).get("elsys", {}).get("block") for e in run["events"]] == [2, 3, None, None]
     report = C.check_file(path)
     assert statuses(report) == ["OK", "OK", "NO BLOCK", "NO BLOCK"]
@@ -194,9 +188,7 @@ def test_check_event_agrees_with_itself_and_the_reader_at_the_window_edges(tmp_p
 
 def test_fill_adds_the_missing_records_and_keeps_a_backup(tmp_path, capsys):
     path = make_experiment(tmp_path)
-    reference = DataManager()
-    reference.load_file(path)
-    extracted = reference.data["runs"][0]["events"]
+    extracted = load_manager(path).data["runs"][0]["events"]
 
     def old_reader(data):                       # the events outside every block got nothing
         drop_record(data, 1)
@@ -217,9 +209,7 @@ def test_fill_adds_the_missing_records_and_keeps_a_backup(tmp_path, capsys):
     backup = tmp_path / "t0001.before-fill.h5"
     assert statuses(C.check_file(backup))[1:3] == ["NOT LOADED", "NOT LOADED"]   # the file as it was
     assert statuses(C.check_file(path)) == ["OK", "OK", "OK", "OK", "NO BLOCK"]
-    again = DataManager()
-    again.load_file(path)
-    events = again.data["runs"][0]["events"]
+    events = load_manager(path).data["runs"][0]["events"]
     for j, label in ((1, "b3"), (2, "b5")):
         filled, original = events[j]["waveform"]["elsys"], extracted[j]["waveform"]["elsys"]
         assert set(filled) == set(original)
@@ -260,9 +250,7 @@ def test_fill_never_replaces_a_record_nor_an_existing_backup(tmp_path, capsys):
     assert backup.read_bytes() == b"an earlier copy"
     report = C.check_file(path)
     assert statuses(report) == ["WRONG BLOCK", "OK", "OK", "OK", "NO BLOCK"]
-    dm = DataManager()
-    dm.load_file(path)
-    events = dm.data["runs"][0]["events"]
+    events = load_manager(path).data["runs"][0]["events"]
     assert events[0]["waveform"]["elsys"]["block"] == 3                # left as it was
     assert events[2]["waveform"]["elsys"]["channels"] == ["pzt_1"]     # the reference's event_fields
     # a record that is present is never touched, even when asked to fill it
@@ -370,9 +358,7 @@ def test_file_without_trigger_blocks(tmp_path):
     indices = [index_at(run, 1.0), index_at(run, 2.5)]
     run["events"] = EventProcessor(path).extract_events(run, indices, window=0.15)
     run["event_extraction"] = {"version": 1, "event_indices": indices, "start_s": -0.15, "end_s": 0.15}
-    dm = DataManager()
-    dm.data = {"name": "t0001", "runs": [run]}
-    dm.save_file(path)
+    save_data({"name": "t0001", "runs": [run]}, path)
     report = C.check_file(path)                    # the continuous recorder's window: nothing to check against
     assert statuses(report) == ["NO BLOCK", "NO BLOCK"] and report.exit_code() == 0
     assert report.rows[0].flags == ["continuous record b1 loaded"] and report.rows[0].loaded_text.startswith("b1 ")

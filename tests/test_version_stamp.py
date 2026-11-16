@@ -11,21 +11,16 @@ from labquake_explorer import main as entry_point
 from labquake_explorer._version import __version__
 from labquake_explorer.data import migrate as M
 from labquake_explorer.data import stamp as S
-from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.preprocessing.build import experiment
-from tests.synthetic import make_experiment
+from tests.synthetic import load_manager, make_experiment, save_data
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def saved(tmp_path, data, suffix=".h5"):
-    dm = DataManager()
-    dm.data = data
     path = tmp_path / f"exp{suffix}"
-    dm.save_file(path)
-    back = DataManager()
-    back.load_file(path)
-    return path, back.data[S.STAMP_KEY]
+    save_data(data, path)
+    return path, load_manager(path).data[S.STAMP_KEY]
 
 
 def test_one_version_everywhere(monkeypatch, capsys):
@@ -72,11 +67,7 @@ def test_saving_stamps_the_writer_and_keeps_the_builder(tmp_path):
         del f[f"{S.STAMP_KEY}/version"]
         f[f"{S.STAMP_KEY}/version"] = b"0.0.1"
     assert M.write_fault_geometry(path, ends_x_mm=(0, 500))
-    back = DataManager()
-    back.load_file(path)
-    entry = back.data[S.STAMP_KEY]
+    entry = load_manager(path).data[S.STAMP_KEY]
     assert entry["version"] == __version__ and entry.get("git") == S.git_description()
     assert M.write_fault_geometry(path, ends_x_mm=(0, 500)) == []     # nothing to do: nothing touched
-    again = DataManager()
-    again.load_file(path)
-    assert again.data[S.STAMP_KEY] == entry
+    assert load_manager(path).data[S.STAMP_KEY] == entry

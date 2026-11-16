@@ -179,7 +179,6 @@ def test_nan_samples_stay_local():
 
 def test_small_inputs():
     event, truth = make_event()
-    s = event["slip"]
     # a search covering one sample is at its own edge
     res = run(event, search_halfwidth_s=0.0002)
     assert all(cs.FLAG_EDGE in x.flags for x in res.sensors)

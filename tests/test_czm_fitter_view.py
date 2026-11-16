@@ -152,24 +152,21 @@ def test_fewer_than_15_channels_opens_without_eyy_panel(app_with_strain):
     event = app_with_strain.data_manager.get_data("runs/[0]/events/[2]")
     add_strain(event, n_channels=8)
     v = CZMFitterView(app_with_strain, 0, 2)
-    try:
-        assert v.num_gauges == 8 and v.eyy_gauge() is None and v.strain_gauge.get() == 6
-        assert len(v.vlines) == 3 and len(v.vlines_twin) == 3
-        labels = [line.get_label() for line in v.axs[0].get_lines()]
-        assert "Exy" in labels and "CZM" in labels
-        assert [line.get_label() for line in v.axs[1].get_lines() if line.get_label() in ("Eyy", "CZM")] == []
-        assert any("no Eyy gauge" in t.get_text() for t in v.axs[1].texts)
-        # the Exy fit and save still work without the Eyy panel
-        v.Cf.set(1000.0)
-        result = v.fit_parameters()
-        assert result is not None and result.success
-        v.save_parameters()
-        assert set(event["czm_parms"]) == EXPECTED_KEYS
-        # a full array on another event restores the Eyy panel
-        v.set_event(1)
-        assert v.eyy_gauge() == 14 and "Eyy" in [line.get_label() for line in v.axs[1].get_lines()]
-    finally:
-        v.on_close()
+    assert v.num_gauges == 8 and v.eyy_gauge() is None and v.strain_gauge.get() == 6
+    assert len(v.vlines) == 3 and len(v.vlines_twin) == 3
+    labels = [line.get_label() for line in v.axs[0].get_lines()]
+    assert "Exy" in labels and "CZM" in labels
+    assert [line.get_label() for line in v.axs[1].get_lines() if line.get_label() in ("Eyy", "CZM")] == []
+    assert any("no Eyy gauge" in t.get_text() for t in v.axs[1].texts)
+    # the Exy fit and save still work without the Eyy panel
+    v.Cf.set(1000.0)
+    result = v.fit_parameters()
+    assert result is not None and result.success
+    v.save_parameters()
+    assert set(event["czm_parms"]) == EXPECTED_KEYS
+    # a full array on another event restores the Eyy panel
+    v.set_event(1)
+    assert v.eyy_gauge() == 14 and "Eyy" in [line.get_label() for line in v.axs[1].get_lines()]
 
 
 def test_fit_and_filter(view):

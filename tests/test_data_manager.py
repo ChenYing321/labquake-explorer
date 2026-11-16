@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from labquake_explorer.data.data_manager import DataManager
-from tests.synthetic import make_experiment
+from tests.synthetic import load_manager as loaded, make_experiment
 
 
 @pytest.fixture
@@ -12,12 +12,6 @@ def dm():
     manager = DataManager()
     manager.data = data
     return manager
-
-
-def loaded(path):
-    other = DataManager()
-    other.load_file(path)
-    return other
 
 
 def test_paths_in_memory(dm):

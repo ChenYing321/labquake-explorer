@@ -3,21 +3,12 @@ import pytest
 
 from labquake_explorer.data import migrate as M
 from labquake_explorer.data.channels import channel_array, positions_table
-from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.data.sources import read_arrivals
-from tests.synthetic import add_strain, make_experiment
-
-
-def save(data, path):
-    dm = DataManager()
-    dm.data = data
-    dm.save_file(path)
+from tests.synthetic import add_strain, load_manager, make_experiment, save_data as save
 
 
 def load(path):
-    dm = DataManager()
-    dm.load_file(path)
-    return dm.data
+    return load_manager(path).data
 
 
 def old_style_experiment():

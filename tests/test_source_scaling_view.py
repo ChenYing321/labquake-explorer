@@ -346,18 +346,15 @@ def test_mechanical_variables(app):
     assert all(np.isnan(value) for value in mechanical_values(v3, trend=True).values())
     populate(app, mech=True)                                 # version 2 records
     v = SourceScalingView(app, 0)
-    try:
-        v.set_y_variable(Y_MECH_STRESS_DROP)
-        fit = v.fit_power_law()
-        assert fit.valid and fit.exponent == pytest.approx(0.0, abs=1e-9) and fit.coefficient == pytest.approx(0.4)
-        v.trend_var.set(True)
-        v.refresh()
-        assert v.fit_power_law().coefficient == pytest.approx(0.5)
-        v.set_y_variable(Y_SLIP)
-        fit = v.fit_power_law()
-        assert fit.exponent == pytest.approx(0.5, abs=1e-6) and fit.coefficient == pytest.approx(60.0)
-    finally:
-        v.on_close()
+    v.set_y_variable(Y_MECH_STRESS_DROP)
+    fit = v.fit_power_law()
+    assert fit.valid and fit.exponent == pytest.approx(0.0, abs=1e-9) and fit.coefficient == pytest.approx(0.4)
+    v.trend_var.set(True)
+    v.refresh()
+    assert v.fit_power_law().coefficient == pytest.approx(0.5)
+    v.set_y_variable(Y_SLIP)
+    fit = v.fit_power_law()
+    assert fit.exponent == pytest.approx(0.5, abs=1e-6) and fit.coefficient == pytest.approx(60.0)
 
 
 def test_quality_gating_in_view(app):
@@ -368,29 +365,26 @@ def test_quality_gating_in_view(app):
         M0_VALUES[0], fc=clipped_fc, band_limited=True, at_bound=True)
     excluded = [{"event": 0, "flags": [FLAG_BAND_LIMITED, FLAG_AT_BOUND]}]
     v = SourceScalingView(app, 0)
-    try:
-        v.set_channel("ch0")
-        assert v.table.item("0")["values"][-1] == "band,bound" and v.table.item("1")["values"][-1] == ""
-        assert float(v.table.item("0")["values"][3]) == pytest.approx(clipped_fc)
-        assert v.excluded == excluded and "1 event(s) excluded by quality flags" in v.status_var.get()
-        assert len(v.flagged_scatter_artist.get_offsets()) == 1 and "excluded" in v.flagged_scatter_artist.get_label()
-        assert len(v.scatter_artist.get_offsets()) == 3
-        fit = v.fit_power_law()
-        assert fit.valid and fit.n == 3 and v.fit_indices == [1, 2, 3]
-        assert fit.exponent == pytest.approx(-THIRD, abs=1e-6) and "1 event(s) excluded" in v.fit_text.get()
-        saved = v.save()
-        assert saved["include_flagged"] is False and saved["n_excluded"] == 1
-        assert saved["excluded"] == excluded and saved["event_indices"] == [1, 2, 3]
-        # override: the clipped record enters the fit and biases the exponent
-        v.set_include_flagged(True)
-        assert v.excluded == [] and "INCLUDED" in v.status_var.get()
-        assert "in fit" in v.flagged_scatter_artist.get_label() and len(v.scatter_artist.get_offsets()) == 4
-        fit = v.fit_power_law()
-        assert fit.n == 4 and v.fit_indices == [0, 1, 2, 3] and fit.exponent > -THIRD + 0.05
-        saved = v.save()
-        assert saved["include_flagged"] is True and saved["n_excluded"] == 0
-    finally:
-        v.on_close()
+    v.set_channel("ch0")
+    assert v.table.item("0")["values"][-1] == "band,bound" and v.table.item("1")["values"][-1] == ""
+    assert float(v.table.item("0")["values"][3]) == pytest.approx(clipped_fc)
+    assert v.excluded == excluded and "1 event(s) excluded by quality flags" in v.status_var.get()
+    assert len(v.flagged_scatter_artist.get_offsets()) == 1 and "excluded" in v.flagged_scatter_artist.get_label()
+    assert len(v.scatter_artist.get_offsets()) == 3
+    fit = v.fit_power_law()
+    assert fit.valid and fit.n == 3 and v.fit_indices == [1, 2, 3]
+    assert fit.exponent == pytest.approx(-THIRD, abs=1e-6) and "1 event(s) excluded" in v.fit_text.get()
+    saved = v.save()
+    assert saved["include_flagged"] is False and saved["n_excluded"] == 1
+    assert saved["excluded"] == excluded and saved["event_indices"] == [1, 2, 3]
+    # override: the clipped record enters the fit and biases the exponent
+    v.set_include_flagged(True)
+    assert v.excluded == [] and "INCLUDED" in v.status_var.get()
+    assert "in fit" in v.flagged_scatter_artist.get_label() and len(v.scatter_artist.get_offsets()) == 4
+    fit = v.fit_power_law()
+    assert fit.n == 4 and v.fit_indices == [0, 1, 2, 3] and fit.exponent > -THIRD + 0.05
+    saved = v.save()
+    assert saved["include_flagged"] is True and saved["n_excluded"] == 0
 
 
 def test_near_field_is_a_warning_not_a_default_exclusion(app):
@@ -400,49 +394,47 @@ def test_near_field_is_a_warning_not_a_default_exclusion(app):
     for j, event in enumerate(events):
         event["pzt_spectrum"]["channels"]["ch0"] = source_record(M0_VALUES[j % 4], far_field_ok=(j == 3))
     v = SourceScalingView(app, 0)
-    try:
-        v.set_channel("ch0")
-        assert [r["flags"] for r in v.rows] == [[FLAG_NEAR_FIELD]] * 3 + [[]]
-        assert all(r["flagged"] is False for r in v.rows) and v.excluded == [] and v.flagged_scatter_artist is None
-        assert v.table.item("0")["values"][-1] == "kR" and v.table.item("3")["values"][-1] == ""
-        assert "3 near-field event(s) (kR < 3 at the band's low edge) in the fit" in v.status_var.get()
-        assert "excluded" not in v.status_var.get()
-        fit = v.fit_power_law()
-        assert fit.valid and fit.n == 4 and v.fit_indices == [0, 1, 2, 3]
-        assert fit.exponent == pytest.approx(-THIRD, abs=1e-6)
-        saved = v.save()
-        assert saved["exclude_near_field"] is False and saved["n_excluded"] == 0
-        # on request the near-field records are gated out like the fit-quality flags
-        v.set_exclude_near_field(True)
-        assert [r["flagged"] for r in v.rows] == [True, True, True, False]
-        assert v.excluded == [{"event": j, "flags": [FLAG_NEAR_FIELD]} for j in range(3)]
-        assert "3 event(s) excluded by quality flags" in v.status_var.get()
-        assert len(v.flagged_scatter_artist.get_offsets()) == 3
-        fit = v.fit_power_law()
-        assert not fit.valid and fit.n == 1
-        # 'all' channels and the include-flagged override interact the same way
-        v.set_channel(ALL_CHANNELS)
-        assert [r["flagged"] for r in v.rows] == [True, True, True, False]
-        v.set_include_flagged(True)
-        assert v.excluded == [] and v.fit_power_law().n == 4
-        v.set_include_flagged(False)
-        v.set_exclude_near_field(False)
-        assert all(r["flagged"] is False for r in v.rows)
-        # a band-limited AND near-field record is excluded for the band limit only
-        events[1]["pzt_spectrum"]["channels"]["ch0"] = source_record(
-            M0_VALUES[1], fc=1e3, band_limited=True, far_field_ok=False)
-        v.set_channel("ch0")
-        assert v.rows[1]["flags"] == [FLAG_BAND_LIMITED, FLAG_NEAR_FIELD]
-        assert v.rows[1]["gating_flags"] == [FLAG_BAND_LIMITED]
-        assert v.excluded == [{"event": 1, "flags": [FLAG_BAND_LIMITED]}]
-        assert "excluded by quality flags (band-limited)" in v.status_var.get()
-        # the saved gating choice is restored and compared on reopen
-        v.set_exclude_near_field(True)
-        v.set_include_flagged(True)
-        v.fit_power_law()
-        v.save()
-    finally:
-        v.on_close()
+    v.set_channel("ch0")
+    assert [r["flags"] for r in v.rows] == [[FLAG_NEAR_FIELD]] * 3 + [[]]
+    assert all(r["flagged"] is False for r in v.rows) and v.excluded == [] and v.flagged_scatter_artist is None
+    assert v.table.item("0")["values"][-1] == "kR" and v.table.item("3")["values"][-1] == ""
+    assert "3 near-field event(s) (kR < 3 at the band's low edge) in the fit" in v.status_var.get()
+    assert "excluded" not in v.status_var.get()
+    fit = v.fit_power_law()
+    assert fit.valid and fit.n == 4 and v.fit_indices == [0, 1, 2, 3]
+    assert fit.exponent == pytest.approx(-THIRD, abs=1e-6)
+    saved = v.save()
+    assert saved["exclude_near_field"] is False and saved["n_excluded"] == 0
+    # on request the near-field records are gated out like the fit-quality flags
+    v.set_exclude_near_field(True)
+    assert [r["flagged"] for r in v.rows] == [True, True, True, False]
+    assert v.excluded == [{"event": j, "flags": [FLAG_NEAR_FIELD]} for j in range(3)]
+    assert "3 event(s) excluded by quality flags" in v.status_var.get()
+    assert len(v.flagged_scatter_artist.get_offsets()) == 3
+    fit = v.fit_power_law()
+    assert not fit.valid and fit.n == 1
+    # 'all' channels and the include-flagged override interact the same way
+    v.set_channel(ALL_CHANNELS)
+    assert [r["flagged"] for r in v.rows] == [True, True, True, False]
+    v.set_include_flagged(True)
+    assert v.excluded == [] and v.fit_power_law().n == 4
+    v.set_include_flagged(False)
+    v.set_exclude_near_field(False)
+    assert all(r["flagged"] is False for r in v.rows)
+    # a band-limited AND near-field record is excluded for the band limit only
+    events[1]["pzt_spectrum"]["channels"]["ch0"] = source_record(
+        M0_VALUES[1], fc=1e3, band_limited=True, far_field_ok=False)
+    v.set_channel("ch0")
+    assert v.rows[1]["flags"] == [FLAG_BAND_LIMITED, FLAG_NEAR_FIELD]
+    assert v.rows[1]["gating_flags"] == [FLAG_BAND_LIMITED]
+    assert v.excluded == [{"event": 1, "flags": [FLAG_BAND_LIMITED]}]
+    assert "excluded by quality flags (band-limited)" in v.status_var.get()
+    # the saved gating choice is restored and compared on reopen
+    v.set_exclude_near_field(True)
+    v.set_include_flagged(True)
+    v.fit_power_law()
+    v.save()
+    v.on_close()
     v2 = SourceScalingView(app, 0)
     assert v2.exclude_near_field_var.get() is True and v2.include_flagged_var.get() is True and v2.saved_agrees
     v2.on_close()
@@ -453,23 +445,20 @@ def test_inconsistent_constants_are_reported(app):
     for j, event in enumerate(events):
         event["pzt_spectrum"]["channels"]["ch1"] = source_record(5.0 * M0_VALUES[j % 4], phase="S", k=0.372)
     v = SourceScalingView(app, 0)
-    try:
-        v.set_channel("ch0")
-        phases, constants, consistent = v.constants_summary()
-        assert phases == ["P"] and len(constants) == 1 and consistent
-        assert "WARNING" not in v.status_var.get()
-        v.set_channel(ALL_CHANNELS)
-        phases, constants, consistent = v.constants_summary()
-        assert phases == ["P", "S"] and len(constants) == 2 and not consistent
-        assert "WARNING: phase/constants differ" in v.status_var.get()
-        assert all(r["constants_consistent"] is False for r in v.rows)
-        v.fit_power_law()
-        saved = v.save()
-        assert saved["phases"] == ["P", "S"] and saved["constants_consistent"] is False
-        assert sorted(c["phase"] for c in saved["constants"]) == ["P", "S"]
-        assert {c["k"] for c in saved["constants"]} == {K, 0.372}
-    finally:
-        v.on_close()
+    v.set_channel("ch0")
+    phases, constants, consistent = v.constants_summary()
+    assert phases == ["P"] and len(constants) == 1 and consistent
+    assert "WARNING" not in v.status_var.get()
+    v.set_channel(ALL_CHANNELS)
+    phases, constants, consistent = v.constants_summary()
+    assert phases == ["P", "S"] and len(constants) == 2 and not consistent
+    assert "WARNING: phase/constants differ" in v.status_var.get()
+    assert all(r["constants_consistent"] is False for r in v.rows)
+    v.fit_power_law()
+    saved = v.save()
+    assert saved["phases"] == ["P", "S"] and saved["constants_consistent"] is False
+    assert sorted(c["phase"] for c in saved["constants"]) == ["P", "S"]
+    assert {c["k"] for c in saved["constants"]} == {K, 0.372}
 
 
 def test_saved_result_survives_hdf5_reload(app, app_from_file, tmp_path):
@@ -494,18 +483,15 @@ def test_saved_result_survives_hdf5_reload(app, app_from_file, tmp_path):
     ctx = app2.context_at(app2.find_item("runs/[0]"))
     app2.run_action(next(a for a in actions_for(ctx.kind) if a.label == "Source Scaling"), ctx)
     v2 = app2.child_windows[-1]
-    try:
-        assert isinstance(v2, SourceScalingView)
-        assert v2.channel_combo.get() == "ch1" and v2.y_combo.get() == Y_RADIUS
-        assert v2.include_flagged_var.get() is False and v2.exclude_near_field_var.get() is False
-        assert v2.saved_agrees is True and v2.fit.exponent == pytest.approx(saved["exponent"], abs=1e-9)
-        assert "Saved fit" in v2.fit_text.get() and "agrees" in v2.fit_text.get()
-        assert f"[{saved['bootstrap_16_84'][0]:.4g}" in v2.fit_text.get()
-        # a second save and a second file write work on the reloaded data
-        assert v2.save() is not None
-        app2.data_manager.save_file(tmp_path / "scaling2.h5")
-    finally:
-        v2.on_close()
+    assert isinstance(v2, SourceScalingView)
+    assert v2.channel_combo.get() == "ch1" and v2.y_combo.get() == Y_RADIUS
+    assert v2.include_flagged_var.get() is False and v2.exclude_near_field_var.get() is False
+    assert v2.saved_agrees is True and v2.fit.exponent == pytest.approx(saved["exponent"], abs=1e-9)
+    assert "Saved fit" in v2.fit_text.get() and "agrees" in v2.fit_text.get()
+    assert f"[{saved['bootstrap_16_84'][0]:.4g}" in v2.fit_text.get()
+    # a second save and a second file write work on the reloaded data
+    assert v2.save() is not None
+    app2.data_manager.save_file(tmp_path / "scaling2.h5")
 
 
 def _inject_brune_pulses(app, channel, fc_hz=10e3, omega0_v=1.0):
@@ -537,40 +523,34 @@ def test_pzt_view_records_feed_the_scaling_view(app_with_strain, tmp_path):
     csv.write_text("frequency_hz,gain\n" + "\n".join(f"{fi:.6g},2.0" for fi in f) + "\n")
     for j in range(len(events)):
         pv = PZTSpectrumView(app, 0, j)
-        try:
-            pv.set_channel(3)
-            pv.calibration_path_var.set(str(csv))
-            pv.unit_combobox.set("V/m")
-            assert pv.compute(), pv.status_var.get()
-            assert pv.fit.valid and not pv.fit.band_limited, pv.fit.warnings
-            pv.rho_var.set("2700"); pv.c_var.set("6000"); pv.vs_var.set("3500"); pv.distance_var.set("0.05")
-            assert pv.compute_source(), pv.status_var.get()
-            assert pv.record["source"]["far_field_ok"] is False        # kR ~ 0.06 at ~1.2 kHz
-            assert pv.save()
-        finally:
-            pv.on_close()
+        pv.set_channel(3)
+        pv.calibration_path_var.set(str(csv))
+        pv.unit_combobox.set("V/m")
+        assert pv.compute(), pv.status_var.get()
+        assert pv.fit.valid and not pv.fit.band_limited, pv.fit.warnings
+        pv.rho_var.set("2700"); pv.c_var.set("6000"); pv.vs_var.set("3500"); pv.distance_var.set("0.05")
+        assert pv.compute_source(), pv.status_var.get()
+        assert pv.record["source"]["far_field_ok"] is False        # kR ~ 0.06 at ~1.2 kHz
+        assert pv.save()
     assert set(events[0]["strain"]["spectrum"]["sets"]["default"]["channels"]) == {"ch3"}      # saved with the record
 
     v = SourceScalingView(app, 0)
-    try:
-        assert list(v.channel_combo["values"]) == [ALL_CHANNELS, "ch3"]
-        v.set_channel("ch3")
-        assert all(np.isfinite(r["seismic_moment_nm"]) for r in v.rows)
-        assert all(r["flags"] == [FLAG_NEAR_FIELD] and not r["flagged"] for r in v.rows)
-        assert "near-field event(s)" in v.status_var.get() and "excluded" not in v.status_var.get()
-        fit = v.fit_power_law()
-        assert fit.valid and fit.n == len(events), v.fit_text.get()
-        assert fit.exponent < 0                                        # fc falls as M0 grows
-        saved = v.save()
-        assert saved["channel"] == "ch3" and saved["phases"] == ["P"]
-        assert saved["constants"] == [{"phase": "P", "rho_kg_m3": 2700.0, "vp_m_s": 6000.0,
-                                       "vs_m_s": 3500.0, "k": 0.32}]
-        v.set_channel(ALL_CHANNELS)                                    # 'all' sees the same single channel
-        assert v.fit_power_law().n == len(events)
-        v.set_exclude_near_field(True)                                 # the gating empties the fit only on request
-        assert not v.fit_power_law().valid
-    finally:
-        v.on_close()
+    assert list(v.channel_combo["values"]) == [ALL_CHANNELS, "ch3"]
+    v.set_channel("ch3")
+    assert all(np.isfinite(r["seismic_moment_nm"]) for r in v.rows)
+    assert all(r["flags"] == [FLAG_NEAR_FIELD] and not r["flagged"] for r in v.rows)
+    assert "near-field event(s)" in v.status_var.get() and "excluded" not in v.status_var.get()
+    fit = v.fit_power_law()
+    assert fit.valid and fit.n == len(events), v.fit_text.get()
+    assert fit.exponent < 0                                        # fc falls as M0 grows
+    saved = v.save()
+    assert saved["channel"] == "ch3" and saved["phases"] == ["P"]
+    assert saved["constants"] == [{"phase": "P", "rho_kg_m3": 2700.0, "vp_m_s": 6000.0,
+                                   "vs_m_s": 3500.0, "k": 0.32}]
+    v.set_channel(ALL_CHANNELS)                                    # 'all' sees the same single channel
+    assert v.fit_power_law().n == len(events)
+    v.set_exclude_near_field(True)                                 # the gating empties the fit only on request
+    assert not v.fit_power_law().valid
 
 
 def test_result_set_chooser_selects_the_records(app_with_strain):
@@ -651,46 +631,41 @@ def test_shared_t_star_scan_and_refit_set(app):
     app.data_manager.data.setdefault("analysis", {})["pzt_spectrum"] = {
         "sets": {"default": {"settings": {"pre_ms": 0.5}, "sensors": {"pzt_4": {"t_star_s": None, "distance_m": 0.1}}}}}
     v = SourceScalingView(app, 0)
-    try:
-        assert v.t_star_text.get() == "no scan yet"
-        v.t_star_grid_var.set("abc")
-        assert not v.scan_t_star() and "t* grid" in v.status_var.get()
-        v.t_star_grid_var.set("-10, 50, 2")
-        assert v.scan_t_star(), v.status_var.get()
-        scan = v.t_star_scans["ch3"]
-        assert scan.best_t_star_s == pytest.approx(20e-6) and scan.n_records == len(events)
-        assert "ch3: t* = 20 us" in v.t_star_text.get() and v.plot_combo.get() == PLOT_T_STAR
-        assert len(v.ax.lines) >= 2 and "t* scan" in v.ax.get_title()
-        saved = app.data_manager.get_data(f"runs/[0]/{T_STAR_KEY}")
-        assert saved["result_set"] == "default" and saved["sensors"]["ch3"]["best_t_star_s"] == pytest.approx(20e-6)
-        v.plot_combo.set("scaling")
-        v.plot()
-        assert "source scaling" in v.ax.get_title()
-        # the refits go into a new, named set, which is then shown; the sensor's t* goes into its settings
-        assert not v.save_refits() and "needs a name" in v.status_var.get()
-        v.refit_set_var.set("default")
-        assert not v.save_refits() and "different" in v.status_var.get()
-        v.refit_set_var.set("tstar")
-        assert v.save_refits(), v.status_var.get()
-        assert v.result_set == "tstar" and list(v.set_combo["values"]) == ["default", "tstar"]
-        new = events[0]["pzt_spectrum"]["sets"]["tstar"]["channels"]["ch3"]
-        old = events[0]["pzt_spectrum"]["sets"]["default"]["channels"]["ch3"]
-        assert new["t_star_s"] == pytest.approx(20e-6) and new["result_set"] == "tstar" and new["ensemble"] is None
-        assert new["t_star_refit"]["from_set"] == "default"
-        assert ts.record_input(old).fit(0.0).fc < 0.5 * new["fit"]["fc"]       # the uncorrected fit sits far too low
-        assert new["fit"]["fc"] == pytest.approx(8e3, rel=0.05) and new["source"]["valid"]
-        assert new["source"]["seismic_moment_nm"] != old["source"]["seismic_moment_nm"]
-        sets = app.data_manager.data["analysis"]["pzt_spectrum"]["sets"]
-        assert sets["tstar"]["sensors"]["pzt_4"]["t_star_s"] == pytest.approx(20e-6)
-        assert sets["tstar"]["settings"]["pre_ms"] == 0.5 and sets["default"]["sensors"]["pzt_4"]["t_star_s"] is None
-        # the scan belongs to the set it was made on, and is restored from the run
-        assert "saved scan is for set 'default'" in v.t_star_text.get()
-    finally:
-        v.on_close()
+    assert v.t_star_text.get() == "no scan yet"
+    v.t_star_grid_var.set("abc")
+    assert not v.scan_t_star() and "t* grid" in v.status_var.get()
+    v.t_star_grid_var.set("-10, 50, 2")
+    assert v.scan_t_star(), v.status_var.get()
+    scan = v.t_star_scans["ch3"]
+    assert scan.best_t_star_s == pytest.approx(20e-6) and scan.n_records == len(events)
+    assert "ch3: t* = 20 us" in v.t_star_text.get() and v.plot_combo.get() == PLOT_T_STAR
+    assert len(v.ax.lines) >= 2 and "t* scan" in v.ax.get_title()
+    saved = app.data_manager.get_data(f"runs/[0]/{T_STAR_KEY}")
+    assert saved["result_set"] == "default" and saved["sensors"]["ch3"]["best_t_star_s"] == pytest.approx(20e-6)
+    v.plot_combo.set("scaling")
+    v.plot()
+    assert "source scaling" in v.ax.get_title()
+    # the refits go into a new, named set, which is then shown; the sensor's t* goes into its settings
+    assert not v.save_refits() and "needs a name" in v.status_var.get()
+    v.refit_set_var.set("default")
+    assert not v.save_refits() and "different" in v.status_var.get()
+    v.refit_set_var.set("tstar")
+    assert v.save_refits(), v.status_var.get()
+    assert v.result_set == "tstar" and list(v.set_combo["values"]) == ["default", "tstar"]
+    new = events[0]["pzt_spectrum"]["sets"]["tstar"]["channels"]["ch3"]
+    old = events[0]["pzt_spectrum"]["sets"]["default"]["channels"]["ch3"]
+    assert new["t_star_s"] == pytest.approx(20e-6) and new["result_set"] == "tstar" and new["ensemble"] is None
+    assert new["t_star_refit"]["from_set"] == "default"
+    assert ts.record_input(old).fit(0.0).fc < 0.5 * new["fit"]["fc"]       # the uncorrected fit sits far too low
+    assert new["fit"]["fc"] == pytest.approx(8e3, rel=0.05) and new["source"]["valid"]
+    assert new["source"]["seismic_moment_nm"] != old["source"]["seismic_moment_nm"]
+    sets = app.data_manager.data["analysis"]["pzt_spectrum"]["sets"]
+    assert sets["tstar"]["sensors"]["pzt_4"]["t_star_s"] == pytest.approx(20e-6)
+    assert sets["tstar"]["settings"]["pre_ms"] == 0.5 and sets["default"]["sensors"]["pzt_4"]["t_star_s"] is None
+    # the scan belongs to the set it was made on, and is restored from the run
+    assert "saved scan is for set 'default'" in v.t_star_text.get()
+    v.on_close()
     v = SourceScalingView(app, 0)
-    try:
-        v.set_combo.set("default")
-        v.on_set_selected()
-        assert v.t_star_scans["ch3"].best_t_star_s == pytest.approx(20e-6) and "ch3: t* = 20 us" in v.t_star_text.get()
-    finally:
-        v.on_close()
+    v.set_combo.set("default")
+    v.on_set_selected()
+    assert v.t_star_scans["ch3"].best_t_star_s == pytest.approx(20e-6) and "ch3: t* = 20 us" in v.t_star_text.get()
