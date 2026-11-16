@@ -55,6 +55,12 @@ saved with the record loads its picks, filter and settings; a new name keeps
 the picks shown, and Save writes them under it.  The set saved last is the
 record's current one, which the CZM fitter and PZT Spectrum read and a new
 window opens on; the window keeps its set when it steps to another event.
+Save also keeps, for the experiment, what the set was saved with on each
+kind of record (``analysis['pick_arrivals']['sets'][<set>]['records'][<recorder>]``:
+the filter, the auto-pick entries, the front mode, and the channels shown
+and fitted by name), so that an event without picks in that set starts from
+it, and choosing the set on such an event takes its controls but keeps the
+picks shown.
 ``choose_pick_set(name)`` and ``pick_set`` drive it headlessly.
 """
 from __future__ import annotations
@@ -76,6 +82,7 @@ from labquake_explorer.ui.views.base import EventView
 from labquake_explorer.ui.views.scroll_panel import ScrollPanel
 from labquake_explorer.ui.views.slip_distribution_view import apex_text, segment_speed_label, segment_text
 from labquake_explorer.data.channels import aligned_fields, get_field
+from labquake_explorer.data.settings import get_setting, set_setting
 from labquake_explorer.data.sources import (DEFAULT_ARRIVAL_SET, arrival_set_name, arrival_sets, current_arrival_set,
                                             pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
                                             waveform_channels, waveform_data, waveform_time, waveform_trigger_time,
@@ -104,6 +111,7 @@ FLAG_SHORT = {ap.FLAG_WEAK: "weak onset", ap.FLAG_AT_NOISE_END: "at noise end", 
 FRONT_COLOR = "red"
 NOISE_TRIGGER_GUARD_FRACTION = 0.1    # auto pick: the noise ends this share of the pre-trigger record before it
 NOISE_FRACTION = 0.2                  # ... or, without a trigger, after this share of the record
+SETTING = "pick_arrivals"              # analysis['pick_arrivals']['sets'][<set>]: what a new event starts from
 MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
               ("LP_displacement", r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$"), ("slip", r"$\delta\ \mathrm{({\mu}m)}$"))
 
@@ -453,6 +461,57 @@ class DynamicStrainArrivalPickerView(EventView):
         self.record_combobox.set(self.record_key)
         self.load_record()
 
+    # ------------------------------------------------------------- template
+    def recorder(self) -> str:
+        """The record's short name for the template: ``elsys``, ``ni``, ``strain``."""
+        return str(self.record_key).split("/")[-1]
+
+    def template(self) -> Optional[dict]:
+        """What this pick set was last saved with on this kind of record, or None."""
+        value = get_setting(self.data_manager.data, SETTING, "sets", self.pick_set, "records", self.recorder())
+        return value if isinstance(value, dict) else None
+
+    def store_template(self) -> None:
+        """What Save keeps for the experiment, per pick set and kind of record
+        (``elsys``, ``ni``, ``strain``), so that an event without picks in that
+        set starts from it: the filter, the auto-pick entries, the front mode and
+        the names of the channels shown and fitted."""
+        names = self.channel_names()
+        entry = {"filter": self.saved_filter(), "front_mode": self.front_mode_var.get(),
+                 "shown": [n for n, v in zip(names, self.enabled_channels) if v],
+                 "fit": [n for n, v in zip(names, self.fitting_channels) if v]}
+        try:
+            auto = self.read_auto_settings()
+            entry["auto_pick"] = {"method": auto["method"], "threshold": auto["threshold"],
+                                  "smoothing_us": float(self.auto_smoothing_var.get())}
+        except ValueError:
+            pass
+        set_setting(self.data_manager.data, entry, SETTING, "sets", self.pick_set, "records", self.recorder())
+
+    def apply_template(self, n: int) -> bool:
+        """The set's last saved controls for this kind of record, and its shown
+        and fitted channels by name; False (nothing changed) without one."""
+        entry = self.template()
+        if entry is None:
+            return False
+        self.restore_filter(entry.get("filter"))
+        if entry.get("front_mode") in sprof.FRONT_MODES:
+            self.front_mode_var.set(entry["front_mode"])
+        auto = entry.get("auto_pick")
+        if isinstance(auto, dict):
+            if auto.get("method") in ap.METHODS:
+                self.auto_method_var.set(ap.METHOD_LABELS[auto["method"]])
+            for key, var in (("threshold", self.auto_threshold_var), ("smoothing_us", self.auto_smoothing_var)):
+                if auto.get(key) is not None:
+                    var.set(f"{float(auto[key]):g}")
+        names = self.channel_names()
+        for key, attr in (("shown", "enabled_channels"), ("fit", "fitting_channels")):
+            if entry.get(key) is not None:
+                chosen = {str(v) for v in np.asarray(entry[key], dtype=object).ravel()}
+                if not chosen or chosen & set(names):               # names of another layout do not apply
+                    setattr(self, attr, [name in chosen for name in names][:n])
+        return True
+
     # ------------------------------------------------------------ pick sets
     @staticmethod
     def initial_pick_set(block) -> str:
@@ -460,8 +519,11 @@ class DynamicStrainArrivalPickerView(EventView):
         return current_arrival_set(block) or DEFAULT_ARRIVAL_SET
 
     def known_pick_sets(self) -> list:
-        """The sets to offer: the record's, the current one and ``default``."""
+        """The sets to offer: the record's, the experiment's, the current one and ``default``."""
         names = set(arrival_sets(self.current_block())) | {DEFAULT_ARRIVAL_SET, self.pick_set}
+        sets = get_setting(self.data_manager.data, SETTING, "sets")
+        if isinstance(sets, dict):
+            names.update(str(k) for k in sets)
         return [DEFAULT_ARRIVAL_SET] + sorted(names - {DEFAULT_ARRIVAL_SET})
 
     def refresh_pick_sets(self) -> None:
@@ -490,7 +552,14 @@ class DynamicStrainArrivalPickerView(EventView):
         else:
             self.refresh_pick_sets()
             self.saved_state = None
-            self.update_status(f"new pick set '{name}': Save writes the picks shown under it")
+            if self.apply_template(len(self.picked_idx)):        # the set's controls, the picks shown kept
+                self.xlim = self.ax_wave.get_xlim()
+                self.plot()
+                self.update_fitted_line()
+                self.update_status(f"pick set '{name}' not saved for this record: its last controls, "
+                                   "the picks shown; Save writes them under it")
+            else:
+                self.update_status(f"new pick set '{name}': Save writes the picks shown under it")
 
     def choose_pick_set(self, name: str) -> None:
         """Choose the pick set by name, as typing it in the Pick set box does."""
@@ -523,10 +592,13 @@ class DynamicStrainArrivalPickerView(EventView):
                 self.auto_flags = [str(np.asarray(f).ravel()[0]) if np.size(f) else "" for f in flags]
             self.auto_settings = {k: v for k, v in auto.items() if k != "flags"}
         self.apply_record_defaults()
-        self.restore_filter(saved.get("filter"))
-        mode = saved.get("front_mode")
-        mode = str(np.asarray(mode).ravel()[0]) if mode is not None and np.size(mode) else "single"
-        self.front_mode_var.set(mode if mode in sprof.FRONT_MODES else "single")
+        if self.picked_idx is None:                       # nothing saved in this set: start from the set's last save
+            self.apply_template(n)
+        else:
+            self.restore_filter(saved.get("filter"))
+            mode = saved.get("front_mode")
+            mode = str(np.asarray(mode).ravel()[0]) if mode is not None and np.size(mode) else "single"
+            self.front_mode_var.set(mode if mode in sprof.FRONT_MODES else "single")
         locations = saved.get("locations")
         if locations is not None and len(locations) == n and np.isfinite(np.asarray(locations, float)).any():
             xs = [float(v) for v in locations]
@@ -1293,6 +1365,7 @@ class DynamicStrainArrivalPickerView(EventView):
             front["use"] = [i in self.fit_channels() for i in range(len(self.picked_idx))]
             arrivals["front"] = front
         write_arrivals(block, arrivals, self.event, self.pick_set)
+        self.store_template()
         self.saved_state = self.current_state()
         self.refresh_pick_sets()
         self.app.refresh_tree()

@@ -174,11 +174,11 @@ def test_switching_events_and_unsaved_channel_edits(app_with_strain, view, no_di
     assert view.status_var.get().endswith("differs from the saved record")
     assert dm.get_data(f"{EVENT}/strain/enabled_channels")[1] is False
 
-    # a fresh event comes up with the defaults
+    # a fresh event comes up with default picks and the channels of the last save
     view.set_event(2)
     assert view.event_idx == 2 and view.title() == "Pick Arrivals - Event 2" and view.event_combobox.get() == "2"
     assert view.event is dm.get_data("runs/[0]/events/[2]")
-    assert view.fitting_channels == OLD_LAYOUT_FITTING and len(view.fitting_markers) == 4
+    assert view.fitting_channels == fitting and len(view.fitting_markers) == 5
     assert len(set(view.picked_idx)) == 1 and np.isnan(view.rupture_speed)
     assert view.cf_label.cget("text") == "Cf = n/a"
     # going back restores what was saved
@@ -648,7 +648,7 @@ def test_named_pick_sets(app, tmp_path, app_from_file):
     peaks = list(view.picked_idx)
     assert peaks != onsets
     assert arrival_sets(block) == ["default", "peak"] and current_arrival_set(block) == "peak"
-    assert "analysis" not in app.data_manager.data                    # nothing at the experiment level
+    assert "current_set" not in app.data_manager.data["analysis"]["pick_arrivals"]   # no experiment-wide set
     assert list(view.pick_set_combobox["values"]) == ["default", "peak"]
     # the readers that know nothing of sets take the set saved last
     assert read_arrivals(block)["picked_idx"] == peaks
@@ -692,3 +692,51 @@ def test_pick_sets_on_the_psu_strain_layout(app_with_strain, view):
     assert read_arrivals(strain, view.event, "default")["rupture_speed"] == view.event["rupture_speed"]
     view.choose_pick_set("default")
     assert view.picked_idx == default
+
+
+def test_an_event_without_picks_in_the_set_starts_from_its_last_save(app, tmp_path, app_from_file):
+    from labquake_explorer.data.settings import get_setting
+    xs = [100.0, 200.0, 300.0, 400.0]
+    for j in (1, 2, 3):
+        add_pzt_record(app.data_manager.get_data(f"runs/[0]/events/[{j}]"), xs, noise=0.01)
+    view = Picker(app, 0, 1)
+    view.set_filter(tf.KIND_BANDPASS, low_khz=1.0, high_khz=20.0, order=2)
+    view.auto_method_var.set("slope")
+    view.auto_threshold_var.set("7")
+    view.front_mode_var.set("bilateral")
+    view.set_shown(0, False)
+    view.set_fitting(3, False)
+    view.auto_pick()
+    view.save()
+    template = get_setting(app.data_manager.data, "pick_arrivals", "sets", "default", "records", "elsys")
+    assert template["shown"] == ["pzt_2", "pzt_3", "pzt_4"] and template["fit"] == ["pzt_1", "pzt_2", "pzt_3"]
+    assert template["auto_pick"]["method"] == "slope" and template["front_mode"] == "bilateral"
+    # a fresh window on another event: the controls and the channel choice of the last save
+    view.set_filter(tf.KIND_OFF)
+    view.set_event(2)
+    assert view.filter_kind() == tf.KIND_BANDPASS and view.filter_order_var.get() == "2"
+    assert view.auto_method_var.get() == "slope" and view.auto_threshold_var.get() == "7"
+    assert view.front_mode_var.get() == "bilateral"
+    assert view.enabled_channels == [False, True, True, True] and view.fitting_channels == [True, True, True, False]
+    assert view.status_var.get().endswith("not saved")
+    # an event with picks of its own keeps them, its filter included
+    view.set_filter(tf.KIND_OFF)
+    view.set_shown(0, True)
+    view.save()                                                        # event 2, and the template, now unfiltered
+    view.set_event(1)
+    assert view.filter_kind() == tf.KIND_BANDPASS and view.enabled_channels[0] is False
+    # a set never saved leaves the controls as they are; choosing a saved set on an event without
+    # its picks takes the set's controls and keeps the picks shown
+    view.choose_pick_set("other")
+    assert view.filter_kind() == tf.KIND_BANDPASS and list(view.pick_set_combobox["values"]) == ["default", "other"]
+    view.set_event(3)
+    picks = list(view.picked_idx)
+    assert view.pick_set == "other" and view.filter_kind() == tf.KIND_BANDPASS
+    view.choose_pick_set("default")
+    assert view.filter_kind() == tf.KIND_OFF and view.enabled_channels == [True] * 4 and view.picked_idx == picks
+    assert "its last controls, the picks shown" in view.status_var.get()
+    view.on_close()
+    # the template survives the file
+    app.data_manager.save_file(tmp_path / "template.h5")
+    reopened = Picker(app_from_file(tmp_path / "template.h5"), 0, 3)
+    assert reopened.filter_kind() == tf.KIND_OFF and reopened.fitting_channels == [True, True, True, False]

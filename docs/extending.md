@@ -99,6 +99,7 @@ wrote (`name`, `date`, `sample`, a `fault` description, ...):
 | `analysis['fault']` | `patch_x_mm = [from, to]`, the edges of the bare PMMA patch along the fault in mm (in either order), and `ends_x_mm = [from, to]`, where the fault (the sample) ends, both in the frame of the sensor positions. The Slip Distribution view draws them, cuts the slip profile at the ends and can save both; a notebook sets them with `experiment(..., analysis={'fault': {'patch_x_mm': [x0, x1], 'ends_x_mm': [0, 500]}})`. A value without two finite, different numbers is not drawn, and the view says it is unusable |
 | `analysis['medium']` | `rho_kg_m3`, `vp_m_s`, `vs_m_s` of the sample, as last saved by the PZT Spectrum view and offered to every new window |
 | `analysis['pzt_spectrum']` | per result set (see the `spectrum` schema), `sets[<name>]['settings']` (the PZT Spectrum view's controls as last saved in that set: the keys of a `spectrum` record below plus `phase` and `radiation_coefficient`) and `sets[<name>]['sensors']` (per sensor, keyed by the channel's field name such as `pzt_1`, else `ch<k>`: the `calibration` table, `calibration_path`, `calibration_unit`, `calibration_db`, `calibration_divisor`, `t_star_s`, `distance_m`, `free_surface_factor`), and `current_set`, the set last saved, where a new window opens. Files written before result sets (2026-11) keep flat `settings` / `sensors`: they are read as the set `default` and moved on the next save or by the migration tool |
+| `analysis['pick_arrivals']` | `sets[<name>]['records'][<recorder>]`: what the Pick Arrivals view last saved in that pick set on that kind of record (`elsys`, `ni`, `strain`): `filter`, `auto_pick` (`method`, `threshold`, `smoothing_us`), `front_mode`, and the channels `shown` and `fit` by name. An event without picks in the set starts from it; choosing the set on such an event takes these controls and keeps the picks on screen |
 
 Files saved earlier kept the patch edges and fault ends as top-level
 `patch_x_mm` / `fault_ends_x_mm` or as `fault = {'patch_x_mm': ...,
@@ -257,7 +258,8 @@ the set `default` and becomes version 2 on the next save or with
 `data.migrate`. The set saved last is the record's `current` one, which
 `read_arrivals(block, event)` returns when no set is named, so the CZM
 fitter's `Cf` and PZT Spectrum's "picked arrival" trigger follow it, and a
-new Pick Arrivals window opens on it. A set name is non-empty and has no `/`. Each set's record:
+new Pick Arrivals window opens on it; what an event without picks in a set
+starts from is kept in `analysis['pick_arrivals']` (see Run layout). A set name is non-empty and has no `/`. Each set's record:
 
 | key | meaning |
 |---|---|
