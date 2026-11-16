@@ -648,7 +648,7 @@ def test_named_pick_sets(app, tmp_path, app_from_file):
     peaks = list(view.picked_idx)
     assert peaks != onsets
     assert arrival_sets(block) == ["default", "peak"] and current_arrival_set(block) == "peak"
-    assert "current_set" not in app.data_manager.data["analysis"]["pick_arrivals"]   # no experiment-wide set
+    assert app.data_manager.data["analysis"]["pick_arrivals"]["current_set"] == "peak"
     assert list(view.pick_set_combobox["values"]) == ["default", "peak"]
     # the readers that know nothing of sets take the set saved last
     assert read_arrivals(block)["picked_idx"] == peaks
@@ -668,7 +668,7 @@ def test_named_pick_sets(app, tmp_path, app_from_file):
     view.set_event(2)
     assert view.pick_set == "peak" and view.status_var.get().endswith("set 'peak': not saved")
     view.on_close()
-    # a file round trip; a new window opens on the record's current set
+    # a file round trip; a new window opens on the experiment's set, also on an event without it
     path = tmp_path / "sets.h5"
     app.data_manager.save_file(path)
     reopened = Picker(app_from_file(path), 0, 1)
@@ -676,6 +676,10 @@ def test_named_pick_sets(app, tmp_path, app_from_file):
     assert reopened.status_var.get().endswith("set 'peak': saved")
     reopened.choose_pick_set("default")
     assert reopened.picked_idx == onsets
+    reopened.save()                                                    # 'default' is the experiment's set now
+    assert Picker(reopened.app, 0, 2).pick_set == "default"
+    reopened.app.data_manager.data["analysis"]["pick_arrivals"]["current_set"] = "a/b"   # unusable: the record's
+    assert Picker(reopened.app, 0, 1).pick_set == "default"
 
 
 def test_pick_sets_on_the_psu_strain_layout(app_with_strain, view):

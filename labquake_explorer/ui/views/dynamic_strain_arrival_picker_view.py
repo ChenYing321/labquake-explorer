@@ -53,8 +53,10 @@ A record keeps named pick sets (hand picks, onset picks, peak picks, the
 picks of another burst), chosen or named in the Pick set box by Save: a set
 saved with the record loads its picks, filter and settings; a new name keeps
 the picks shown, and Save writes them under it.  The set saved last is the
-record's current one, which the CZM fitter and PZT Spectrum read and a new
-window opens on; the window keeps its set when it steps to another event.
+record's current one, which the CZM fitter and PZT Spectrum read, and, as in
+PZT Spectrum, the experiment's (``analysis['pick_arrivals']['current_set']``),
+which a new window opens on; the window keeps its set when it steps to
+another event.
 Save also keeps, for the experiment, what the set was saved with on each
 kind of record (``analysis['pick_arrivals']['sets'][<set>]['records'][<recorder>]``:
 the filter, the auto-pick entries, the front mode, and the channels shown
@@ -112,6 +114,7 @@ FRONT_COLOR = "red"
 NOISE_TRIGGER_GUARD_FRACTION = 0.1    # auto pick: the noise ends this share of the pre-trigger record before it
 NOISE_FRACTION = 0.2                  # ... or, without a trigger, after this share of the record
 SETTING = "pick_arrivals"              # analysis['pick_arrivals']['sets'][<set>]: what a new event starts from
+CURRENT_SET_SETTING = "current_set"    # analysis['pick_arrivals']['current_set']: the set saved last, where a window opens
 MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
               ("LP_displacement", r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$"), ("slip", r"$\delta\ \mathrm{({\mu}m)}$"))
 
@@ -513,10 +516,14 @@ class DynamicStrainArrivalPickerView(EventView):
         return True
 
     # ------------------------------------------------------------ pick sets
-    @staticmethod
-    def initial_pick_set(block) -> str:
-        """The set a new window opens on: the record's current set (saved last), else ``default``."""
-        return current_arrival_set(block) or DEFAULT_ARRIVAL_SET
+    def initial_pick_set(self, block) -> str:
+        """The set a new window opens on, as in PZT Spectrum: the one last saved
+        in the experiment (``analysis['pick_arrivals']['current_set']``), else
+        the record's current set, else ``default``."""
+        try:
+            return arrival_set_name(get_setting(self.data_manager.data, SETTING, CURRENT_SET_SETTING))
+        except ValueError:
+            return current_arrival_set(block) or DEFAULT_ARRIVAL_SET
 
     def known_pick_sets(self) -> list:
         """The sets to offer: the record's, the experiment's, the current one and ``default``."""
@@ -1366,6 +1373,7 @@ class DynamicStrainArrivalPickerView(EventView):
             arrivals["front"] = front
         write_arrivals(block, arrivals, self.event, self.pick_set)
         self.store_template()
+        set_setting(self.data_manager.data, self.pick_set, SETTING, CURRENT_SET_SETTING)
         self.saved_state = self.current_state()
         self.refresh_pick_sets()
         self.app.refresh_tree()
