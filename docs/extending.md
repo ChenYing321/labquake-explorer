@@ -256,9 +256,8 @@ A version-1 `arrivals` (the record itself, with its own `version`) is read as
 the set `default` and becomes version 2 on the next save or with
 `data.migrate`. The set saved last is the record's `current` one, which
 `read_arrivals(block, event)` returns when no set is named, so the CZM
-fitter's `Cf` and PZT Spectrum's "picked arrival" trigger follow it; the view
-also stores it as `analysis['pick_arrivals']['current_set']`, which a new
-window opens on. A set name is non-empty and has no `/`. Each set's record:
+fitter's `Cf` and PZT Spectrum's "picked arrival" trigger follow it, and a
+new Pick Arrivals window opens on it. A set name is non-empty and has no `/`. Each set's record:
 
 | key | meaning |
 |---|---|

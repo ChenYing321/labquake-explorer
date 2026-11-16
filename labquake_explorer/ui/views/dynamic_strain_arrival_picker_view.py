@@ -53,9 +53,9 @@ A record keeps named pick sets (hand picks, onset picks, peak picks, the
 picks of another burst), chosen or named in the Pick set box by Save: a set
 saved with the record loads its picks, filter and settings; a new name keeps
 the picks shown, and Save writes them under it.  The set saved last is the
-record's current one, which the CZM fitter and PZT Spectrum read, and the
-experiment's (``analysis['pick_arrivals']['current_set']``), which a new
-window opens on.  ``choose_pick_set(name)`` and ``pick_set`` drive it headlessly.
+record's current one, which the CZM fitter and PZT Spectrum read and a new
+window opens on; the window keeps its set when it steps to another event.
+``choose_pick_set(name)`` and ``pick_set`` drive it headlessly.
 """
 from __future__ import annotations
 
@@ -76,7 +76,6 @@ from labquake_explorer.ui.views.base import EventView
 from labquake_explorer.ui.views.scroll_panel import ScrollPanel
 from labquake_explorer.ui.views.slip_distribution_view import apex_text, segment_speed_label, segment_text
 from labquake_explorer.data.channels import aligned_fields, get_field
-from labquake_explorer.data.settings import get_setting, set_setting
 from labquake_explorer.data.sources import (DEFAULT_ARRIVAL_SET, arrival_set_name, arrival_sets, current_arrival_set,
                                             pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
                                             waveform_channels, waveform_data, waveform_time, waveform_trigger_time,
@@ -105,8 +104,6 @@ FLAG_SHORT = {ap.FLAG_WEAK: "weak onset", ap.FLAG_AT_NOISE_END: "at noise end", 
 FRONT_COLOR = "red"
 NOISE_TRIGGER_GUARD_FRACTION = 0.1    # auto pick: the noise ends this share of the pre-trigger record before it
 NOISE_FRACTION = 0.2                  # ... or, without a trigger, after this share of the record
-PICK_ARRIVALS_SETTING = "pick_arrivals"     # analysis['pick_arrivals']
-CURRENT_SET_SETTING = "current_set"        # ... ['current_set']: the pick set saved last
 MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
               ("LP_displacement", r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$"), ("slip", r"$\delta\ \mathrm{({\mu}m)}$"))
 
@@ -457,14 +454,10 @@ class DynamicStrainArrivalPickerView(EventView):
         self.load_record()
 
     # ------------------------------------------------------------ pick sets
-    def initial_pick_set(self, block) -> str:
-        """The set a new window opens on: the one last saved for the experiment
-        (``analysis['pick_arrivals']['current_set']``), else the record's current
-        set, else ``default``."""
-        try:
-            return arrival_set_name(get_setting(self.data_manager.data, PICK_ARRIVALS_SETTING, CURRENT_SET_SETTING))
-        except ValueError:
-            return current_arrival_set(block) or DEFAULT_ARRIVAL_SET
+    @staticmethod
+    def initial_pick_set(block) -> str:
+        """The set a new window opens on: the record's current set (saved last), else ``default``."""
+        return current_arrival_set(block) or DEFAULT_ARRIVAL_SET
 
     def known_pick_sets(self) -> list:
         """The sets to offer: the record's, the current one and ``default``."""
@@ -1300,7 +1293,6 @@ class DynamicStrainArrivalPickerView(EventView):
             front["use"] = [i in self.fit_channels() for i in range(len(self.picked_idx))]
             arrivals["front"] = front
         write_arrivals(block, arrivals, self.event, self.pick_set)
-        set_setting(self.data_manager.data, self.pick_set, PICK_ARRIVALS_SETTING, CURRENT_SET_SETTING)
         self.saved_state = self.current_state()
         self.refresh_pick_sets()
         self.app.refresh_tree()

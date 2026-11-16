@@ -626,7 +626,6 @@ def test_auto_pick_methods_flags_and_hand_moves(app):
 
 # --------------------------------------------------------------- pick sets
 def test_named_pick_sets(app, tmp_path, app_from_file):
-    from labquake_explorer.data.settings import get_setting
     from labquake_explorer.data.sources import arrival_sets, current_arrival_set
     event = app.data_manager.get_data("runs/[0]/events/[1]")
     time, t_trig = add_pzt_record(event, [100.0, 200.0, 300.0, 400.0], noise=0.01)
@@ -649,7 +648,7 @@ def test_named_pick_sets(app, tmp_path, app_from_file):
     peaks = list(view.picked_idx)
     assert peaks != onsets
     assert arrival_sets(block) == ["default", "peak"] and current_arrival_set(block) == "peak"
-    assert get_setting(app.data_manager.data, "pick_arrivals", "current_set") == "peak"
+    assert "analysis" not in app.data_manager.data                    # nothing at the experiment level
     assert list(view.pick_set_combobox["values"]) == ["default", "peak"]
     # the readers that know nothing of sets take the set saved last
     assert read_arrivals(block)["picked_idx"] == peaks
@@ -669,7 +668,7 @@ def test_named_pick_sets(app, tmp_path, app_from_file):
     view.set_event(2)
     assert view.pick_set == "peak" and view.status_var.get().endswith("set 'peak': not saved")
     view.on_close()
-    # a file round trip; a new window opens on the experiment's set
+    # a file round trip; a new window opens on the record's current set
     path = tmp_path / "sets.h5"
     app.data_manager.save_file(path)
     reopened = Picker(app_from_file(path), 0, 1)
