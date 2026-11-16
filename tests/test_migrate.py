@@ -95,7 +95,7 @@ def test_upgrade_brings_runs_and_events_up_to_date(tmp_path):
     arrivals = read_arrivals(e0["waveform"]["elsys"])
     assert arrivals["picked_idx"] == [100, 200] and arrivals["fitting_channels"] == [True, False]
     assert arrivals["rupture_speed"] == 1500.0 and "rupture_speed" not in e0
-    assert "picked_idx" not in e0["waveform"]["elsys"] and e0["waveform"]["elsys"]["arrivals"]["version"] == 1
+    assert "picked_idx" not in e0["waveform"]["elsys"] and e0["waveform"]["elsys"]["arrivals"]["version"] == 2
     assert "pzt_spectrum" not in e0
     moved = e0["waveform"]["elsys"]["spectrum"]
     assert moved["version"] == 2 and "channels" not in moved
@@ -213,3 +213,12 @@ def test_flat_pzt_settings_and_version_1_stores_upgrade_to_result_sets():
     assert any("version 2" in n for n in notes)
     assert event["waveform"]["elsys"]["spectrum"] == {"version": 2, "sets": {"default": {"channels": {"ch0": {"channel": 0}}}}}
     assert M.upgrade_event(event, {}, "e") == []
+
+
+def test_version_1_arrivals_become_the_default_pick_set():
+    record = channel_array(np.zeros((2, 5)), ["a", "b"], time=np.arange(5.0), sample_rate=1.0, trigger_time=1.0)
+    record["arrivals"] = {"version": 1, "picked_idx": [1, 2]}
+    event = {"event_time": 1.0, "waveform": {"elsys": record}}
+    assert M.upgrade_event(event, {}, "e") == ["e: waveform/elsys/arrivals upgraded to version 2 (pick set default)"]
+    assert record["arrivals"] == {"version": 2, "current": "default", "sets": {"default": {"picked_idx": [1, 2]}}}
+    assert M.upgrade_event(event, {}, "e") == []                        # nothing left to do

@@ -428,7 +428,7 @@ def test_save_and_reopen_restore_everything(slip_app, view, tmp_path, app_from_f
     view.select_profile_model("quadratic")
     view.set_profile_use(1, False)
     view.set_front_use(6, False)
-    set_front_mode(view, "single")
+    set_front_mode(view, "unilateral")
     type_patch(view, "120", "380")
     assert view.save()
     rec = slip_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/slip_analysis")
@@ -437,7 +437,7 @@ def test_save_and_reopen_restore_everything(slip_app, view, tmp_path, app_from_f
     assert rec["time_method"][5] == "manual" and rec["fit_before_s"][5] == [-3.0, -1.0]
     assert rec["fit_before_s"][0] == [-3.75, -1.25] and rec["rate_snr"] == 3.0 and rec["patch_x_mm"] == [120.0, 380.0]
     assert rec["profile"]["model"] == "quadratic" and rec["profile"]["use"][1] is False
-    assert rec["front"]["mode"] == "single" and rec["front"]["use"][6] is False and rec["front"]["use_auto"] is False
+    assert rec["front"]["mode"] == "unilateral" and rec["front"]["use"][6] is False and rec["front"]["use_auto"] is False
     assert set(rec["profile"]["params"]) == {"c0", "c1", "c2"} and rec["front"]["segments"]
     assert "matches the saved record" in view.status_var.get()
     path = tmp_path / "exp.h5"
@@ -449,7 +449,7 @@ def test_save_and_reopen_restore_everything(slip_app, view, tmp_path, app_from_f
             assert v2.fit_before[5] == (-3.0, -1.0) and v2.same_windows_var.get() is False and v2.snr_var.get() == "3"
             np.testing.assert_allclose([s.coseismic_slip for s in v2.result.sensors], rec["coseismic_slip_um"])
             assert v2.profile_model() == "quadratic" and v2.profile_use[1] is False
-            assert v2.front_mode_combobox.get() == "single" and v2.front_use[6] is False and not v2.front_use_auto
+            assert v2.front_mode_combobox.get() == "unilateral" and v2.front_use[6] is False and not v2.front_use_auto
             assert v2.patch_x_mm == (120.0, 380.0)                 # from the record: the experiment has none
             assert "matches the saved record" in v2.status_var.get()
             if app is slip_app:
@@ -500,11 +500,11 @@ def test_profile_models_tips_and_choices_carried_to_another_event(slip_app, view
     # the choices carry to an event without a record; the sensors used do not
     view.weighted_var.set(False)
     view.select_profile_model("quadratic")
-    set_front_mode(view, "single")
+    set_front_mode(view, "unilateral")
     type_patch(view, "150", "400")
     add_slip_array(events(slip_app)[2], slips_um=[0.0, 0.0, 31.7, 82.9, 100.0, 82.9, 31.7, 0.0], noise_um=0.05)
     view.set_event(2)
-    assert view.profile_fit.model == "quadratic" and view.front_fit.mode == "single"
+    assert view.profile_fit.model == "quadratic" and view.front_fit.mode == "unilateral"
     assert view.profile_use == [True] * 8 and view.front_use_auto is True
     assert view.patch_x_mm == (150.0, 400.0) and view.patch_note_var.get() == "not saved to the experiment"
     # the quadratic profile is zero outside its tips: 100 um at 279 mm, zero 150 mm either side
@@ -522,7 +522,7 @@ def test_front_lines_and_sensors_left_out_by_their_event_time(slip_app, view):
     assert view.front_use_auto and view.front_use == [True] * 8 and view.front_fit.valid
     assert view.front_text_var.get().endswith("sensors: all, none with a doubtful t_i")
     assert "doubtful t_i" not in [t.get_text() for t in view.ax_front.get_legend().get_texts()]
-    for mode in ("single", "bilateral"):                  # a line and a speed per segment
+    for mode in ("unilateral", "bilateral"):                  # a line and a speed per segment
         set_front_mode(view, mode)
         segments = view.front_fit.segments
         assert view.front_fit.valid and segments
@@ -546,12 +546,12 @@ def test_front_lines_and_sensors_left_out_by_their_event_time(slip_app, view):
     assert view.front_text_var.get().endswith(f"sensors: all but {sum(doubtful)} with a doubtful t_i")
     view.set_front_use(3, False)
     assert view.front_use_auto is False and view.front_use[3] is False
-    set_front_mode(view, "single")
-    assert view.front_fit.mode == "single" and view.front_fit.segments[0].n == sum(view.front_use)
+    set_front_mode(view, "unilateral")
+    assert view.front_fit.mode == "unilateral" and view.front_fit.segments[0].n == sum(view.front_use)
     # too few sensors with a clean t_i
     view.set_event(3)
     assert view.front_use_auto and not any(view.front_use)
-    for mode in ("bilateral", "single"):
+    for mode in ("bilateral", "unilateral"):
         set_front_mode(view, mode)
         assert view.front_text_var.get() == ("front: no sensor with a clean t_i; choose sensors under Sensors used\n"
                                              "sensors: all but 8 with a doubtful t_i")
@@ -583,7 +583,7 @@ def test_front_texts_name_the_apex_and_unresolved_speeds():
     into = sprof.FrontFit("bilateral", True, "", [seg(31, 250, 2e-5), seg(250, 465, -2e-5)], 250.0, 0.0213)
     assert apex_text(into).startswith("fronts meet at x = 250 mm")
     assert apex_text(sprof.FrontFit("bilateral", True, "", [seg(31, 465, 0.0)], float("nan"), float("nan"))) is None
-    assert apex_text(sprof.FrontFit("single", True, "", [seg(31, 465, 2e-5)])) is None
+    assert apex_text(sprof.FrontFit("unilateral", True, "", [seg(31, 465, 2e-5)])) is None
     fast = seg(31, 279, 1e-6, resolved=False, min_speed=496.0)
     assert segment_speed_label(fast) == "> 496 m/s" and "faster than 496 m/s" in segment_text(fast)
     assert segment_speed_label(seg(31, 279, 0.0)) == "simultaneous"
@@ -889,7 +889,7 @@ def test_status_names_an_entry_that_was_not_applied(slip_app, view):
     enter(view, view.on_settings_edited, smoothing_var="10")  # the applied value again
     assert view.status_var.get().endswith(" | matches the saved record")
     type_patch(view, "400", "150")
-    set_front_mode(view, "single")
+    set_front_mode(view, "unilateral")
     assert view.status_var.get().endswith(" | entry not applied: the patch must have from < to")
 
 

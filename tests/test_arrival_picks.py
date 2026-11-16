@@ -80,3 +80,30 @@ def test_robust_spread_ignores_outliers():
     v[:20] = 100.0
     centre, spread = ap.robust_spread(v)
     assert abs(centre) < 0.1 and spread == pytest.approx(1.0, rel=0.1)
+
+
+def test_a_search_window_picks_the_burst_wanted():
+    x = trace(onset=3200) + trace(onset=2300, amp=3.0, seed=1, oscillate=True) * (np.arange(N) < 2600)
+    for method in (ap.METHOD_DIFFERENCE, ap.METHOD_SLOPE, ap.METHOD_PEAK):
+        (whole,) = ap.auto_pick([x], method, NOISE_END)
+        assert whole.index < 2700                                         # the larger, earlier burst
+        (pick,) = ap.auto_pick([x], method, NOISE_END, search=(3000, 3800))
+        assert 3195 <= pick.index <= (3800 if method == ap.METHOD_PEAK else 3210) and pick.flag == ""
+    # a window starting inside the rise: the onset is its start, flagged
+    (pick,) = ap.auto_pick([trace()], ap.METHOD_DIFFERENCE, NOISE_END, search=(ONSET + 5, None))
+    assert pick.index == ONSET + 5 and pick.flag == ap.FLAG_AT_SEARCH_START
+    # a window before the noise's end shortens the noise; one with too little noise before it is refused
+    (pick,) = ap.auto_pick([trace()], ap.METHOD_DIFFERENCE, 3500, search=(2400, None))
+    assert abs(pick.index - ONSET) <= 6
+    (pick,) = ap.auto_pick([trace()], ap.METHOD_DIFFERENCE, NOISE_END, search=(5, None))
+    assert pick.index is None and pick.flag == ap.FLAG_NO_NOISE
+
+
+def test_peak_flags_a_weak_largest_value():
+    noise = 0.01 * np.random.default_rng(2).standard_normal(N)
+    (pick,) = ap.auto_pick([noise], ap.METHOD_PEAK, NOISE_END)                 # nothing above 5 x the noise
+    assert pick.index is None and pick.flag == ap.FLAG_WEAK and pick.peak < 5 * pick.noise
+    (pick,) = ap.auto_pick([noise], ap.METHOD_PEAK, NOISE_END, threshold=2.0)
+    assert pick.index is not None and pick.flag == ""
+    assert ap.pick_peak(noise, NOISE_END, threshold=None).index is not None   # no check asked for
+    assert ap.pick_peak(noise, 0).index is not None                            # no noise window: unchecked
