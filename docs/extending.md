@@ -240,12 +240,25 @@ bound typed replaces the automatic one (`bounds=...`), and with every
 parameter held the profile is drawn without a fit. Held parameters count as
 resolved.
 
-### `arrivals` (Pick Arrivals, per record, version 1)
+### `arrivals` (Pick Arrivals, per record, version 2)
 
 Pick Arrivals works on one full-rate record at a time (the Record selector:
 `waveform/elsys`, `waveform/ni`, ... or the PSU `strain`), and its results
 belong to that record, `event['waveform'][recorder]['arrivals']`, so strain
-and PZT picks never overwrite each other:
+and PZT picks never overwrite each other. A record keeps named pick sets
+(hand picks, onset picks, peak picks, the picks of another burst):
+
+```
+{"version": 2, "current": "<set saved last>", "sets": {"<name>": {<record>}}}
+```
+
+A version-1 `arrivals` (the record itself, with its own `version`) is read as
+the set `default` and becomes version 2 on the next save or with
+`data.migrate`. The set saved last is the record's `current` one, which
+`read_arrivals(block, event)` returns when no set is named, so the CZM
+fitter's `Cf` and PZT Spectrum's "picked arrival" trigger follow it; the view
+also stores it as `analysis['pick_arrivals']['current_set']`, which a new
+window opens on. A set name is non-empty and has no `/`. Each set's record:
 
 | key | meaning |
 |---|---|
@@ -258,13 +271,16 @@ and PZT picks never overwrite each other:
 | `front_mode`, `front` | the rupture front through the same picks, fitted as in `slip_analysis` (`slip_profile.fit_front`): `single` or `bilateral` (two lines meeting at a fitted apex), and `FrontFit.as_dict()` (`valid`, `reason`, `split_x_mm` and `t0_s` of the apex relative to the event time, `segments` with `velocity_m_s` **positive towards +x**, `r2` and `resolved`) plus `use`, the channels fitted. Records saved before these keys open in `single` |
 | `auto_pick` | present once "Auto pick" placed the picks (`labquake_explorer/analysis/arrival_picks.py`): `method` (`difference` from the noise level, `slope`, or `peak`, the largest departure from the noise level), `threshold` (times the noise's spread, 1.4826 MAD), `smoothing_samples` (the slope's moving average), `noise_end_s` (the noise is the record before this time, relative to the event time: its trigger, else the event time, less a tenth of the record before it, else its first fifth), `filter` (as above, the traces it ran on) and `flags` per channel (`weak onset: ...`, `onset at the end of the noise window`, ...; "" when fine, and cleared when that pick is moved by hand). The pick is the onset of the largest change: back from it to the last stretch of at least 10 samples below the threshold, so an oscillating arrival is picked at its start |
 
-The CZM fitter takes its default `Cf` from the strain record's `arrivals`.
-The PSU `strain` layout keeps its historical keys (`strain/original/picked_idx`,
-`strain/original/rupture_arrival_time`, `strain/enabled_channels`,
-`strain/fitting_channels`, `strain/locations`, and `rupture_speed` at the
-event level) and puts the keys without a historical place (`front_mode`,
-`front`) in `strain['arrivals']`; `sources.read_arrivals(block, event)` and
-`write_arrivals` hide the difference from the views.
+The CZM fitter takes its default `Cf` from the strain record's current set.
+The PSU `strain` layout keeps its `default` set in the historical places
+(`strain/original/picked_idx`, `strain/original/rupture_arrival_time`,
+`strain/enabled_channels`, `strain/fitting_channels`, `strain/locations`, and
+`rupture_speed` at the event level), that set's further keys (`front_mode`,
+`front`, ...) in `strain['arrivals']['sets']['default']`, and every other set
+whole in `strain['arrivals']['sets']`. `sources.read_arrivals(block, event,
+set_name)`, `write_arrivals(block, arrivals, event, set_name)`,
+`arrival_sets(block)` and `current_arrival_set(block)` hide the difference
+from the views.
 
 ### `czm_parms` (CZMFitterView, no version)
 
@@ -582,7 +598,8 @@ paths, channel maps, the calibration, the builders, plots, save.
 layouts above: run keys that were dropped, picks moved into
 `event_extraction`, events reduced to the processed channels plus
 `waveform/<recorder>` records (with `trigger_time` and `positions`), arrival
-picks under `arrivals`, `event_analysis` records at version 3, spectrum
+picks under `arrivals` (version 2: a version-1 record becomes the pick set
+`default`, in the PSU `strain` layout too), `event_analysis` records at version 3, spectrum
 stores at version 2 (result sets) with the flat PZT Spectrum settings of
 `analysis['pzt_spectrum']` moved into its `default` set. The PSU
 `strain` layout is left as it is. The patch edges and fault ends an earlier

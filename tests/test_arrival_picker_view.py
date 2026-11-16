@@ -268,7 +268,7 @@ def test_trace_filters_redraw_the_traces_and_are_saved(app_with_strain, view, tm
     view.set_filter(tf.KIND_BANDPASS, low_khz=2.0, high_khz=1.0)
     assert "low corner must be below the high corner" in view.filter_note_var.get()
     view.save()
-    assert view.event["strain"]["arrivals"]["filter"] == {"kind": "off"}
+    assert read_arrivals(view.event["strain"], view.event)["filter"] == {"kind": "off"}
     view.set_filter(tf.KIND_OFF)
     assert not view.filtering and view.filter_note_var.get().startswith("Nyquist")
     np.testing.assert_allclose(drawn(), _drawn(view, ch, raw[ch]))
@@ -277,9 +277,9 @@ def test_trace_filters_redraw_the_traces_and_are_saved(app_with_strain, view, tm
     view.set_filter(tf.KIND_BANDPASS, low_khz=0.5, high_khz=2.0, order=3, zero_phase=False)
     view.auto_pick()
     view.save()
-    saved = view.event["strain"]["arrivals"]["filter"]
+    saved = read_arrivals(view.event["strain"], view.event)["filter"]
     assert saved == {"kind": "bandpass", "order": 3, "zero_phase": False, "low_hz": 500.0, "high_hz": 2000.0}
-    assert view.event["strain"]["arrivals"]["auto_pick"]["filter"] == saved
+    assert read_arrivals(view.event["strain"], view.event)["auto_pick"]["filter"] == saved
     path = tmp_path / "filter.h5"
     app_with_strain.data_manager.save_file(path)
     reopened = Picker(app_from_file(path), 0, 1)
@@ -420,8 +420,8 @@ def test_pzt_record_defaults_per_record_save_and_readers(app):
     assert abs(view.rupture_speed) == pytest.approx(1500.0, rel=0.05)
     # saved under the record's own 'arrivals', no event-level rupture_speed
     view.save()
-    rec = event["waveform"]["elsys"]["arrivals"]
-    assert rec["version"] == 1 and rec["picked_idx"] == view.picked_idx and rec["locations"] == xs
+    rec = read_arrivals(event["waveform"]["elsys"])
+    assert event["waveform"]["elsys"]["arrivals"]["version"] == 2 and rec["picked_idx"] == view.picked_idx and rec["locations"] == xs
     assert rec["rupture_speed"] == pytest.approx(view.rupture_speed)
     np.testing.assert_allclose(rec["arrival_time"], time[view.picked_idx])
     assert "rupture_speed" not in event and "picked_idx" not in event["waveform"]["elsys"]
@@ -456,7 +456,7 @@ def test_records_keep_their_own_picks_and_entry_defaults(app_with_strain):
     assert view.filter_high_khz.get() == "20" and view.filter_low_khz.get() == "0.2"   # the record's defaults
     view.pick_peaks()
     view.save()
-    assert abs(event["waveform"]["elsys"]["arrivals"]["rupture_speed"]) == pytest.approx(1500.0, rel=0.05)
+    assert abs(read_arrivals(event["waveform"]["elsys"])["rupture_speed"]) == pytest.approx(1500.0, rel=0.05)
     # the strain results were not touched by picking on the PZTs
     assert dm.get_data(f"{EVENT}/rupture_speed") == pytest.approx(strain_speed)
     assert list(event["strain"]["original"]["picked_idx"]) == strain_picks
@@ -511,7 +511,7 @@ def test_a_record_on_an_offset_with_unplaced_channels_and_no_trigger(app, tmp_pa
     assert view.lines[0] is not None and 0 not in view.fit_channels()
     assert "no position" in view.status_var.get()
     view.save()
-    rec = event["waveform"]["ni"]["arrivals"]
+    rec = read_arrivals(event["waveform"]["ni"])
     assert np.isnan(rec["locations"][:2]).all() and rec["locations"][2:] == xs
     view.on_close()
     path = tmp_path / "ni.h5"
@@ -548,7 +548,7 @@ def test_bilateral_front_is_kept_per_record_through_hdf5(app_with_strain, tmp_pa
     assert np.isfinite(view.rupture_speed) and view.fitted_line is None
     assert view.status_var.get().endswith("not saved")
     view.save()
-    rec = event["waveform"]["elsys"]["arrivals"]
+    rec = read_arrivals(event["waveform"]["elsys"])
     assert rec["front_mode"] == "bilateral" and rec["front"]["valid"] is True
     assert len(rec["front"]["segments"]) == 2 and rec["front"]["use"] == [True] * 6
     assert view.status_var.get().endswith("saved")
@@ -564,7 +564,7 @@ def test_bilateral_front_is_kept_per_record_through_hdf5(app_with_strain, tmp_pa
     view.update_fitted_line()
     view.save()
     strain_split = view.front_fit.as_dict()["split_x_mm"]
-    assert event["strain"]["arrivals"]["front_mode"] == "bilateral"
+    assert read_arrivals(event["strain"], event)["front_mode"] == "bilateral"
     assert "front_mode" not in event["strain"]["original"]       # the historical keys stay where they were
     view.on_close()
 
@@ -595,7 +595,7 @@ def test_auto_pick_methods_flags_and_hand_moves(app):
             assert abs(time[view.picked_idx[i]] - onset) < 1e-4
         assert abs(view.rupture_speed) == pytest.approx(1500.0, rel=0.1) and "auto pick (" in view.status_var.get()
         view.save()
-        auto = event["waveform"]["elsys"]["arrivals"]["auto_pick"]
+        auto = read_arrivals(event["waveform"]["elsys"])["auto_pick"]
         assert auto["method"] == method and auto["threshold"] == 5.0 and auto["flags"] == [""] * 4
         assert auto["noise_end_s"] < -0.02                 # before the trigger, relative to the event
     view.on_close()
@@ -622,3 +622,74 @@ def test_auto_pick_methods_flags_and_hand_moves(app):
     view.auto_smoothing_var.set("x")
     assert view.auto_pick() is None and "not a number" in view.status_var.get()
     assert view.picked_idx == picks_now
+
+
+# --------------------------------------------------------------- pick sets
+def test_named_pick_sets(app, tmp_path, app_from_file):
+    from labquake_explorer.data.settings import get_setting
+    from labquake_explorer.data.sources import arrival_sets, current_arrival_set
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    time, t_trig = add_pzt_record(event, [100.0, 200.0, 300.0, 400.0], noise=0.01)
+    block = event["waveform"]["elsys"]
+    view = Picker(app, 0, 1)
+    assert view.pick_set == "default" and view.pick_set_combobox.get() == "default"
+    assert "set 'default': not saved" in view.status_var.get()
+    # onset picks saved as 'default'
+    view.auto_method_var.set("difference from the noise")
+    view.auto_pick()
+    view.save()
+    onsets = list(view.picked_idx)
+    # a new name keeps the picks shown until saved; the peak picks go there
+    view.choose_pick_set("peak")
+    assert view.picked_idx == onsets and "new pick set 'peak'" in view.status_var.get()
+    assert view.status_var.get().endswith("set 'peak': not saved")
+    view.set_filter(tf.KIND_HIGHPASS, low_khz=1.0)
+    view.pick_peaks()
+    view.save()
+    peaks = list(view.picked_idx)
+    assert peaks != onsets
+    assert arrival_sets(block) == ["default", "peak"] and current_arrival_set(block) == "peak"
+    assert get_setting(app.data_manager.data, "pick_arrivals", "current_set") == "peak"
+    assert list(view.pick_set_combobox["values"]) == ["default", "peak"]
+    # the readers that know nothing of sets take the set saved last
+    assert read_arrivals(block)["picked_idx"] == peaks
+    assert _czm_cf(app) == pytest.approx(abs(read_arrivals(block)["rupture_speed"]))
+    # choosing a saved set loads its picks and its filter; the zoom stays
+    view.zoom_to_picks()
+    xlim = view.ax_wave.get_xlim()
+    view.choose_pick_set("default")
+    assert view.picked_idx == onsets and view.filter_kind() == tf.KIND_OFF and view.ax_wave.get_xlim() == xlim
+    assert view.status_var.get().endswith("set 'default': saved") and "pick set 'default' loaded" in view.status_var.get()
+    view.choose_pick_set("peak")
+    assert view.picked_idx == peaks and view.filter_kind() == tf.KIND_HIGHPASS
+    view.choose_pick_set("a/b")                                         # refused, the set stays
+    assert view.pick_set == "peak" and view.pick_set_combobox.get() == "peak" and "'/'" in view.status_var.get()
+    # an event without that set opens on the record's defaults, still in the set chosen
+    add_pzt_record(app.data_manager.get_data("runs/[0]/events/[2]"), [100.0, 200.0, 300.0, 400.0])
+    view.set_event(2)
+    assert view.pick_set == "peak" and view.status_var.get().endswith("set 'peak': not saved")
+    view.on_close()
+    # a file round trip; a new window opens on the experiment's set
+    path = tmp_path / "sets.h5"
+    app.data_manager.save_file(path)
+    reopened = Picker(app_from_file(path), 0, 1)
+    assert reopened.pick_set == "peak" and reopened.picked_idx == peaks
+    assert reopened.status_var.get().endswith("set 'peak': saved")
+    reopened.choose_pick_set("default")
+    assert reopened.picked_idx == onsets
+
+
+def test_pick_sets_on_the_psu_strain_layout(app_with_strain, view):
+    strain = view.event["strain"]
+    view.pick_peaks()
+    view.save()                                                         # 'default': the historical keys
+    default = list(view.picked_idx)
+    assert strain["original"]["picked_idx"] == default
+    view.choose_pick_set("by hand")
+    view.set_pick(view.fit_channels()[0], default[view.fit_channels()[0]] - 20)
+    view.save()
+    assert strain["original"]["picked_idx"] == default                  # left as it was
+    assert read_arrivals(strain, view.event)["picked_idx"] == view.picked_idx
+    assert read_arrivals(strain, view.event, "default")["rupture_speed"] == view.event["rupture_speed"]
+    view.choose_pick_set("default")
+    assert view.picked_idx == default

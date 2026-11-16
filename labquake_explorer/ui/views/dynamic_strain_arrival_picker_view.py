@@ -48,6 +48,14 @@ published analyses, ``-1 / slope`` of ``time = slope * location``.  The record
 also holds ``front_mode`` and ``front`` (``FrontFit.as_dict()`` plus ``use``,
 the channels fitted), whose segment speeds are positive towards +x as in
 ``slip_analysis``; the PSU layout keeps these two under ``strain/arrivals``.
+
+A record keeps named pick sets (hand picks, onset picks, peak picks, the
+picks of another burst), chosen or named in the Pick set box by Save: a set
+saved with the record loads its picks, filter and settings; a new name keeps
+the picks shown, and Save writes them under it.  The set saved last is the
+record's current one, which the CZM fitter and PZT Spectrum read, and the
+experiment's (``analysis['pick_arrivals']['current_set']``), which a new
+window opens on.  ``choose_pick_set(name)`` and ``pick_set`` drive it headlessly.
 """
 from __future__ import annotations
 
@@ -68,7 +76,9 @@ from labquake_explorer.ui.views.base import EventView
 from labquake_explorer.ui.views.scroll_panel import ScrollPanel
 from labquake_explorer.ui.views.slip_distribution_view import apex_text, segment_speed_label, segment_text
 from labquake_explorer.data.channels import aligned_fields, get_field
-from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
+from labquake_explorer.data.settings import get_setting, set_setting
+from labquake_explorer.data.sources import (DEFAULT_ARRIVAL_SET, arrival_set_name, arrival_sets, current_arrival_set,
+                                            pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
                                             waveform_channels, waveform_data, waveform_time, waveform_trigger_time,
                                             write_arrivals)
 
@@ -95,6 +105,8 @@ FLAG_SHORT = {ap.FLAG_WEAK: "weak onset", ap.FLAG_AT_NOISE_END: "at noise end", 
 FRONT_COLOR = "red"
 NOISE_TRIGGER_GUARD_FRACTION = 0.1    # auto pick: the noise ends this share of the pre-trigger record before it
 NOISE_FRACTION = 0.2                  # ... or, without a trigger, after this share of the record
+PICK_ARRIVALS_SETTING = "pick_arrivals"     # analysis['pick_arrivals']
+CURRENT_SET_SETTING = "current_set"        # ... ['current_set']: the pick set saved last
 MECHANICAL = (("shear_stress", r"$\tau$ (MPa)"), ("friction", r"$\mu$"),
               ("LP_displacement", r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$"), ("slip", r"$\delta\ \mathrm{({\mu}m)}$"))
 
@@ -133,6 +145,7 @@ class DynamicStrainArrivalPickerView(EventView):
         self.channel = 0                    # the channel selected in the table
         self.saved_state = None             # (picks, shown, fitting) as saved for this record, or None
         self._defaults = {}                 # the record's default for each entry, to tell an edited one
+        self.pick_set = None                # the pick set shown and saved into (chosen on the first load)
         self._filtered = None               # (key, traces, note): the filtered record, kept while it applies
         self.placed = []                    # per channel: whether the record gives its position
         self._filling_table = False
@@ -293,8 +306,16 @@ class DynamicStrainArrivalPickerView(EventView):
 
         frame = ttk.Frame(left)
         frame.pack(fill="x", pady=4)
+        ttk.Label(frame, text="Pick set:").grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        self.pick_set_combobox = ttk.Combobox(frame, width=16, values=[DEFAULT_ARRIVAL_SET])   # editable
+        self.pick_set_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        for sequence in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+            self.pick_set_combobox.bind(sequence, self.on_pick_set_changed, add="+")
         self.save_button = ttk.Button(frame, text="Save", command=self.save)
-        self.save_button.grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        self.save_button.grid(row=0, column=2, padx=4, pady=2, sticky="w")
+        ttk.Label(frame, text="a saved set loads its picks; a new name keeps the picks shown for Save",
+                  foreground="#606060", wraplength=TEXT_WRAP_PX, justify="left").grid(
+            row=1, column=0, columnspan=3, padx=4, sticky="w")
         self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(left, textvariable=self.status_var, wraplength=TEXT_WRAP_PX, foreground="#a03030",
                   justify="left").pack(fill="x", pady=2)
@@ -435,10 +456,61 @@ class DynamicStrainArrivalPickerView(EventView):
         self.record_combobox.set(self.record_key)
         self.load_record()
 
+    # ------------------------------------------------------------ pick sets
+    def initial_pick_set(self, block) -> str:
+        """The set a new window opens on: the one last saved for the experiment
+        (``analysis['pick_arrivals']['current_set']``), else the record's current
+        set, else ``default``."""
+        try:
+            return arrival_set_name(get_setting(self.data_manager.data, PICK_ARRIVALS_SETTING, CURRENT_SET_SETTING))
+        except ValueError:
+            return current_arrival_set(block) or DEFAULT_ARRIVAL_SET
+
+    def known_pick_sets(self) -> list:
+        """The sets to offer: the record's, the current one and ``default``."""
+        names = set(arrival_sets(self.current_block())) | {DEFAULT_ARRIVAL_SET, self.pick_set}
+        return [DEFAULT_ARRIVAL_SET] + sorted(names - {DEFAULT_ARRIVAL_SET})
+
+    def refresh_pick_sets(self) -> None:
+        self.pick_set_combobox.config(values=self.known_pick_sets())
+        self.pick_set_combobox.set(self.pick_set)
+
+    def on_pick_set_changed(self, event=None) -> None:
+        """A set saved with this record loads its picks, filter and settings; a
+        new name keeps the picks shown, and Save writes them under it."""
+        try:
+            name = arrival_set_name(self.pick_set_combobox.get())
+        except ValueError as e:
+            self.pick_set_combobox.set(self.pick_set)
+            self.update_status(str(e))
+            return
+        if name == self.pick_set:
+            return
+        self.pick_set = name
+        if name in arrival_sets(self.current_block()):
+            xlim = self.ax_wave.get_xlim() if self.ax_wave is not None else None
+            self.load_record()
+            if xlim is not None:                       # keep the zoom, to compare sets on the same stretch
+                self.ax_wave.set_xlim(xlim)
+                self.on_resize()
+            self.update_status(f"pick set '{name}' loaded")
+        else:
+            self.refresh_pick_sets()
+            self.saved_state = None
+            self.update_status(f"new pick set '{name}': Save writes the picks shown under it")
+
+    def choose_pick_set(self, name: str) -> None:
+        """Choose the pick set by name, as typing it in the Pick set box does."""
+        self.pick_set_combobox.set(name)
+        self.on_pick_set_changed()
+
     def load_record(self):
-        """Show the selected record with its saved picks, or the defaults."""
+        """Show the selected record with the picks of the chosen set, or the defaults."""
         block = self.current_block()
-        saved = read_arrivals(block, self.event)
+        if self.pick_set is None:
+            self.pick_set = self.initial_pick_set(block)
+        self.refresh_pick_sets()
+        saved = read_arrivals(block, self.event, self.pick_set)
         n = int(waveform_data(block).shape[0])
 
         def flags(key):
@@ -1198,6 +1270,7 @@ class DynamicStrainArrivalPickerView(EventView):
             state = "saved"
         else:
             state = "differs from the saved record"
+        state = f"set '{self.pick_set}': {state}"
         parts = [message] if message else []
         if not self.has_rupture_speed():
             parts.append("Cf n/a: the fitted picks define no line (fewer than two positions, or one time)")
@@ -1226,8 +1299,10 @@ class DynamicStrainArrivalPickerView(EventView):
             front = self.front_fit.as_dict()
             front["use"] = [i in self.fit_channels() for i in range(len(self.picked_idx))]
             arrivals["front"] = front
-        write_arrivals(block, arrivals, self.event)
+        write_arrivals(block, arrivals, self.event, self.pick_set)
+        set_setting(self.data_manager.data, self.pick_set, PICK_ARRIVALS_SETTING, CURRENT_SET_SETTING)
         self.saved_state = self.current_state()
+        self.refresh_pick_sets()
         self.app.refresh_tree()
         note = "" if self.has_rupture_speed() else " without a rupture speed"
         self.update_status(f"saved to {self.record_key}{note}")

@@ -6,7 +6,7 @@ from labquake_explorer.data.channels import channel_array
 from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.data import sources as S
 from labquake_explorer.utils import tpc5
-from tests.synthetic import write_ni_npz, write_tpc5
+from tests.synthetic import load_manager, save_data, write_ni_npz, write_tpc5
 
 
 def pulse(t0, width=1e-4, amp=0.1):
@@ -278,3 +278,44 @@ def test_waveform_helpers_registry_and_block_mean():
     continuous = channel_array(np.zeros((1, 11)), ["eddy_1"], time=t, sample_rate=10.0)
     assert S.waveform_trigger_time(continuous, run, "waveform/ni") is None
     assert S.waveform_trigger_time({"original": {"time": t, "raw": np.zeros((1, 11))}}, run, "strain") is None
+
+
+def test_arrival_pick_sets_in_both_layouts(tmp_path):
+    rec = lambda k: {"picked_idx": [k, k + 1], "arrival_time": np.array([0.1, 0.2]), "rupture_speed": 1.0 * k}
+    # a waveform record: a version-1 record (or the keys from before 'arrivals') is the set 'default'
+    for block in ({"arrivals": {"version": 1, **rec(1)}}, {"picked_idx": [1, 2], "rupture_arrival_time": [0.1, 0.2]}):
+        assert S.arrival_sets(block) == ["default"] and S.current_arrival_set(block) == "default"
+        assert S.read_arrivals(block)["picked_idx"] == [1, 2]
+        S.write_arrivals(block, rec(5), set_name="peak")                  # upgrades, then adds a set
+        store = block["arrivals"]
+        assert store["version"] == 2 and store["current"] == "peak" and "picked_idx" not in block
+        assert S.arrival_sets(block) == ["default", "peak"]
+        assert S.read_arrivals(block)["rupture_speed"] == 5.0              # None: the set saved last
+        assert S.read_arrivals(block, set_name="default")["picked_idx"] == [1, 2]
+        assert S.read_arrivals(block, set_name="other") == {}
+        S.write_arrivals(block, {**rec(7), "rupture_speed": None})          # None: the current set again
+        assert "rupture_speed" not in store["sets"]["peak"] and store["sets"]["peak"]["picked_idx"] == [7, 8]
+    assert S.arrival_sets({}) == [] and S.current_arrival_set({}) is None and S.read_arrivals({}) == {}
+    for bad in ("", "  ", "a/b"):
+        with pytest.raises(ValueError, match="pick.set"):
+            S.write_arrivals({}, rec(1), set_name=bad)
+    # the PSU strain layout: 'default' stays in its historical places, other sets under strain['arrivals']
+    event = {"rupture_speed": 2.0}
+    strain = {"original": {"time": np.arange(5.0), "raw": np.zeros((2, 5)), "picked_idx": [3, 4],
+                           "rupture_arrival_time": [0.3, 0.4]}, "locations": [1.0, 2.0],
+              "arrivals": {"version": 1, "front_mode": "bilateral"}}
+    assert S.read_arrivals(strain, event) == {"picked_idx": [3, 4], "arrival_time": [0.3, 0.4], "locations": [1.0, 2.0],
+                                              "rupture_speed": 2.0, "front_mode": "bilateral"}
+    S.write_arrivals(strain, rec(9), event, set_name="peak")
+    assert strain["original"]["picked_idx"] == [3, 4] and event["rupture_speed"] == 2.0      # untouched
+    assert S.read_arrivals(strain, event)["rupture_speed"] == 9.0 and S.arrival_sets(strain) == ["default", "peak"]
+    S.write_arrivals(strain, {**rec(6), "locations": [5.0, 6.0]}, event, set_name="default")
+    assert strain["original"]["picked_idx"] == [6, 7] and strain["locations"] == [5.0, 6.0] and event["rupture_speed"] == 6
+    assert strain["arrivals"]["sets"]["default"] == {}          # a save replaces the set; no further keys here
+    assert S.current_arrival_set(strain) == "default"
+    # a file round trip keeps the sets and the current one
+    save_data({"runs": [{"events": [{"waveform": {"elsys": block}}]}]}, tmp_path / "sets.h5")
+    back = load_manager(tmp_path / "sets.h5").data["runs"][0]["events"][0]["waveform"]["elsys"]
+    assert S.current_arrival_set(back) == "peak" and S.arrival_sets(back) == ["default", "peak"]
+    assert list(S.read_arrivals(back, set_name="default")["picked_idx"]) == [1, 2]
+    assert not S.upgrade_arrivals(back)                                     # version 2 already
