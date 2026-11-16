@@ -1,4 +1,4 @@
-"""Automatic arrival picks: difference from the noise, slope, largest value."""
+"""Automatic arrival picks: difference from the noise, slope, peak."""
 import numpy as np
 import pytest
 
@@ -70,10 +70,13 @@ def test_an_oscillation_is_picked_at_its_start_not_at_its_largest_cycle():
     assert pick.index - ONSET > 30
 
 
-def test_largest_value_and_noiseless_traces():
+def test_peak_and_noiseless_traces():
     x = trace(noise=0.0)
-    (pick,) = ap.auto_pick([x], ap.METHOD_EXTREME, NOISE_END)
+    (pick,) = ap.auto_pick([x], ap.METHOD_PEAK, NOISE_END)
     assert pick.index == int(np.argmax(x))
+    pulse = np.exp(-0.5 * ((np.arange(N) - 3000) / 30.0) ** 2) + 0.01 * np.random.default_rng(1).standard_normal(N)
+    (pick,) = ap.auto_pick([5.0 - pulse], ap.METHOD_PEAK, NOISE_END)   # a negative pulse on an offset: its trough
+    assert abs(pick.index - 3000) <= 10 and pick.peak == pytest.approx(1.0, abs=0.05)
     (pick,) = ap.auto_pick([x], ap.METHOD_DIFFERENCE, NOISE_END)      # zero noise: still an onset, no division by 0
     assert pick.flag == "" and ONSET <= pick.index <= ONSET + 2
 

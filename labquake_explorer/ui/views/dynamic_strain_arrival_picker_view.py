@@ -11,13 +11,22 @@ as in the Slip Distribution view (:func:`slip_profile.fit_front`): one line,
 or ``bilateral``, two lines meeting at a fitted apex; each segment is drawn
 with its speed, a segment the front crosses within one sample is marked
 unresolved, and the table gives every shown channel's residual from it.
-"Auto pick" places the shown channels' picks from their traces as drawn
-(filtered when the filter is on; :mod:`labquake_explorer.analysis.arrival_picks`):
-the onset of the largest difference from the noise level, or of the largest
-slope, above a threshold in multiples of the noise, or the largest value
-(the earlier "Magic").  The noise is the record before its trigger (less a
-guard), else its first fifth.  Channels it cannot pick are flagged in the
-table; a pick moved by hand clears its flag.
+Each trace is drawn from its baseline (the median of the noise window) at
+its sensor's position; a channel without a position (``NaN`` in the record's
+``positions``, such as a pressure or LVDT channel) is hidden and not fitted,
+and drawn past the last sensor when shown.
+
+The trace filter (:mod:`labquake_explorer.analysis.trace_filter`) is off,
+Savitzky-Golay, or a Butterworth low-, high- or band-pass, zero phase or
+causal; the picks are made, by hand or automatically, on the traces as
+drawn, and the filter is saved with them.  "Auto pick" places the shown
+channels' picks (:mod:`labquake_explorer.analysis.arrival_picks`): the onset
+of the largest difference from the noise level, or of the largest slope,
+above a threshold in multiples of the noise, or the peak, the largest
+departure from the noise level.  The noise is the record before its trigger
+(or, without one, before the event time), less a tenth of that span, else
+its first fifth.  Channels it cannot pick are flagged in the table; a pick
+moved by hand clears its flag.
 
 The controls sit in a scrolling column on the left: the event and the record,
 a table of the channels (name, position, arrival, whether it is shown and
@@ -30,7 +39,8 @@ A Record selector chooses which record is picked on, and the results belong
 to that record (``read_arrivals``/``write_arrivals`` in
 :mod:`labquake_explorer.data.sources`): ``event['waveform'][recorder]['arrivals']``
 holds ``picked_idx``, ``arrival_time``, ``enabled_channels``,
-``fitting_channels``, ``locations`` and ``rupture_speed`` (absent when the
+``fitting_channels``, ``locations`` (``NaN`` for a channel without a position),
+``filter`` (the trace filter's settings) and ``rupture_speed`` (absent when the
 picks define no line), so strain and PZT picks never overwrite each other.
 The PSU ``strain`` layout keeps its historical keys (``strain/original/picked_idx``,
 ``event['rupture_speed']``, ...).  ``rupture_speed`` keeps the sign of the
@@ -48,10 +58,10 @@ import warnings
 from typing import Optional
 
 import numpy as np
-from scipy import signal
 
 from labquake_explorer.analysis import arrival_picks as ap
 from labquake_explorer.analysis import slip_profile as sprof
+from labquake_explorer.analysis import trace_filter as tf
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
@@ -67,9 +77,11 @@ from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, 
 NEW_LAYOUT_EXP_NUMBER = 5958
 
 # Savitzky-Golay polynomial order; the window must be longer than this.
-FILTER_POLYORDER = 2
+FILTER_POLYORDER = tf.SAVGOL_POLYORDER
 MIN_FILTER_WINDOW = FILTER_POLYORDER + 1
 DEFAULT_FILTER_WINDOW = 51            # samples: the window a record opens with, shown in ms
+DEFAULT_LOW_CORNER_FRACTION = 1e-3    # Butterworth corners a record opens with, as shares of its sample rate
+DEFAULT_HIGH_CORNER_FRACTION = 0.1
 DEFAULT_TRACE_AMPLITUDE_MM = 12.0     # trace amplitude when the sensor spacing is unknown
 ZOOM_MARGIN_FRACTION = 0.5            # "Zoom to picks": this share of the picks' spread on each side ...
 ZOOM_MIN_HALFWIDTH_SAMPLES = 50       # ... and at least this many samples
@@ -113,16 +125,16 @@ class DynamicStrainArrivalPickerView(EventView):
         self.front_lines = []
         self.auto_flags = []                # per channel: the auto pick's flag, "" when none
         self.auto_settings = None           # the settings of the last auto pick, saved with the picks
-        self._smoothing_us_default = None
         self.rupture_speed = None
         self.fitted_line = None
-        self.filtering = False
         self.xlim = None
         self.record_key = None
         self.locations = []
         self.channel = 0                    # the channel selected in the table
         self.saved_state = None             # (picks, shown, fitting) as saved for this record, or None
-        self._filter_window_ms_default = None
+        self._defaults = {}                 # the record's default for each entry, to tell an edited one
+        self._filtered = None               # (key, traces, note): the filtered record, kept while it applies
+        self.placed = []                    # per channel: whether the record gives its position
         self._filling_table = False
         super().__init__(app, run_idx, event_idx)
 
@@ -196,18 +208,47 @@ class DynamicStrainArrivalPickerView(EventView):
 
         frame = ttk.LabelFrame(left, text="Trace filter")
         frame.pack(fill="x", pady=4)
-        self.filter_var = tk.BooleanVar(master=self, value=False)
-        ttk.Checkbutton(frame, text="Savitzky-Golay (order 2)", variable=self.filter_var,
-                        command=self.on_filter_toggled).grid(row=0, column=0, columnspan=2, padx=4, sticky="w")
-        ttk.Label(frame, text="Window (ms):").grid(row=1, column=0, padx=4, pady=2, sticky="e")
+        ttk.Label(frame, text="Filter:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        self.filter_kind_var = tk.StringVar(master=self, value=tf.KIND_LABELS[tf.KIND_OFF])
+        self.filter_combobox = ttk.Combobox(frame, textvariable=self.filter_kind_var, state="readonly", width=22,
+                                            values=[tf.KIND_LABELS[k] for k in tf.KINDS])
+        self.filter_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        self.filter_combobox.bind("<<ComboboxSelected>>", self.on_filter_changed, add="+")
+        self.filter_rows = {}
+        label = ttk.Label(frame, text="Window (ms):")
         self.filter_window_ms = tk.StringVar(master=self, value="")
         self.filter_window_entry = ttk.Entry(frame, textvariable=self.filter_window_ms, width=9)
-        self.filter_window_entry.grid(row=1, column=1, padx=4, pady=2, sticky="w")
-        for sequence in ("<Return>", "<FocusOut>"):
-            self.filter_window_entry.bind(sequence, self.on_filter_window_changed, add="+")
+        self.filter_rows["savgol"] = [(label, dict(row=1, column=0, padx=4, pady=2, sticky="e")),
+                                      (self.filter_window_entry, dict(row=1, column=1, padx=4, pady=2, sticky="w"))]
+        label = ttk.Label(frame, text="Corners (kHz):")
+        corners = ttk.Frame(frame)
+        self.filter_low_khz = tk.StringVar(master=self, value="")
+        self.filter_high_khz = tk.StringVar(master=self, value="")
+        self.filter_low_entry = ttk.Entry(corners, textvariable=self.filter_low_khz, width=8)
+        self.filter_low_entry.pack(side="left")
+        ttk.Label(corners, text="to").pack(side="left", padx=4)
+        self.filter_high_entry = ttk.Entry(corners, textvariable=self.filter_high_khz, width=8)
+        self.filter_high_entry.pack(side="left")
+        order_label = ttk.Label(frame, text="Order:")
+        order_row = ttk.Frame(frame)
+        self.filter_order_var = tk.StringVar(master=self, value=str(tf.DEFAULT_BUTTER_ORDER))
+        self.filter_order_entry = ttk.Entry(order_row, textvariable=self.filter_order_var, width=4)
+        self.filter_order_entry.pack(side="left")
+        self.zero_phase_var = tk.BooleanVar(master=self, value=True)
+        ttk.Checkbutton(order_row, text="zero phase", variable=self.zero_phase_var,
+                        command=self.on_filter_changed).pack(side="left", padx=(10, 0))
+        self.filter_rows["butterworth"] = [(label, dict(row=2, column=0, padx=4, pady=2, sticky="e")),
+                                           (corners, dict(row=2, column=1, padx=4, pady=2, sticky="w")),
+                                           (order_label, dict(row=3, column=0, padx=4, pady=2, sticky="e")),
+                                           (order_row, dict(row=3, column=1, padx=4, pady=2, sticky="w"))]
+        for entry in (self.filter_window_entry, self.filter_low_entry, self.filter_high_entry,
+                      self.filter_order_entry):
+            for sequence in ("<Return>", "<FocusOut>"):
+                entry.bind(sequence, self.on_filter_changed, add="+")
         self.filter_note_var = tk.StringVar(master=self, value="")
-        ttk.Label(frame, textvariable=self.filter_note_var, foreground="#606060").grid(
-            row=2, column=0, columnspan=2, padx=4, sticky="w")
+        ttk.Label(frame, textvariable=self.filter_note_var, foreground="#606060", wraplength=TEXT_WRAP_PX,
+                  justify="left").grid(row=4, column=0, columnspan=2, padx=4, sticky="w")
+        self.show_filter_rows()
 
         frame = ttk.LabelFrame(left, text="Auto pick")
         frame.pack(fill="x", pady=4)
@@ -317,14 +358,38 @@ class DynamicStrainArrivalPickerView(EventView):
 
     @staticmethod
     def block_locations(block, n_channels: int):
-        """Gauge positions along the fault from the record's ``positions`` table
-        (its ``x``), when it has one finite entry per channel; else None."""
+        """Sensor positions along the fault from the record's ``positions`` table
+        (its ``x``, NaN for a channel without one), when it has an entry per
+        channel and at least one is finite; else None."""
         positions = block.get("positions") if isinstance(block, dict) else None
         xs = positions.get("x") if isinstance(positions, dict) else None
         if xs is None or len(xs) != n_channels:
             return None
         xs = [float(v) for v in xs]
-        return xs if all(math.isfinite(v) for v in xs) else None
+        return xs if any(math.isfinite(v) for v in xs) else None
+
+    @classmethod
+    def place_channels(cls, xs) -> tuple:
+        """``(locations, placed)``: a channel without a position (NaN) is drawn
+        past the last sensor, one sensor spacing apart, and ``placed`` is False for it."""
+        xs = [float(v) for v in xs]
+        placed = [math.isfinite(v) for v in xs]
+        known = [v for v, ok in zip(xs, placed) if ok]
+        if not known:
+            return list(xs), placed
+        spacing = cls.trace_amplitude(known)
+        nxt = max(known)
+        out = []
+        for v, ok in zip(xs, placed):
+            if not ok:
+                nxt += spacing
+                v = nxt
+            out.append(v)
+        return out, placed
+
+    def saved_locations(self) -> list:
+        """The positions as saved: NaN for the channels without one."""
+        return [float(v) if ok else math.nan for v, ok in zip(self.locations, self.placed)]
 
     def event_has_record(self, event_idx: int) -> bool:
         try:
@@ -392,20 +457,17 @@ class DynamicStrainArrivalPickerView(EventView):
             if flags is not None and len(flags) == n:
                 self.auto_flags = [str(np.asarray(f).ravel()[0]) if np.size(f) else "" for f in flags]
             self.auto_settings = {k: v for k, v in auto.items() if k != "flags"}
-        if self._smoothing_us_default is None or self.auto_smoothing_var.get() == "":
-            us = ap.DEFAULT_SMOOTHING_SAMPLES * self.sample_interval() * 1e6
-            self._smoothing_us_default = float(f"{us:.3g}")
-            self.auto_smoothing_var.set(f"{self._smoothing_us_default:g}")
+        self.apply_record_defaults()
+        self.restore_filter(saved.get("filter"))
         mode = saved.get("front_mode")
         mode = str(np.asarray(mode).ravel()[0]) if mode is not None and np.size(mode) else "single"
         self.front_mode_var.set(mode if mode in sprof.FRONT_MODES else "single")
         locations = saved.get("locations")
-        if locations is not None and len(locations) == n:
-            self.locations = [float(v) for v in locations]
+        if locations is not None and len(locations) == n and np.isfinite(np.asarray(locations, float)).any():
+            xs = [float(v) for v in locations]
         else:
-            self.locations = self.block_locations(block, n) or self.default_locations(n, self.exp_number())
-        if self._filter_window_ms_default is None or self.filter_window_ms.get() == "":
-            self._set_default_filter_window()
+            xs = self.block_locations(block, n) or self.default_locations(n, self.exp_number())
+        self.locations, self.placed = self.place_channels(xs)
 
         self.table.configure(height=min(max(n, 4), 10))     # a row per channel, scrolling past ten
         self.xlim = None
@@ -440,12 +502,26 @@ class DynamicStrainArrivalPickerView(EventView):
             base = [i in (6, 8, 10, 12) for i in range(16)]
         return (base + [False] * n_channels)[:n_channels]
 
-    def default_picks(self, block, n_channels: int, n_samples: int) -> list:
-        """Initial marker positions: the record's own trigger time when it has
-        one (the waves arrive there), else the middle of the record."""
+    def reference_time(self) -> tuple:
+        """``(time_s, name)``: the record's trigger time when it has one inside
+        the record (the waves arrive there), else the event time when inside it,
+        else ``(None, "")``."""
+        block = self.current_block()
+        t = waveform_time(block)
         t_trig = waveform_trigger_time(block, self.get_run(), self.record_key)
-        if t_trig is not None:
-            idx = int(np.argmin(np.abs(waveform_time(block) - t_trig)))
+        if t_trig is not None and t[0] < t_trig <= t[-1]:
+            return float(t_trig), "trigger"
+        t_event = float(self.event["event_time"])
+        if t[0] < t_event <= t[-1]:
+            return t_event, "event time"
+        return None, ""
+
+    def default_picks(self, block, n_channels: int, n_samples: int) -> list:
+        """Initial marker positions: the record's trigger time, else the event
+        time, else the middle of the record."""
+        t_ref, _ = self.reference_time()
+        if t_ref is not None:
+            idx = int(np.argmin(np.abs(waveform_time(block) - t_ref)))
         else:
             idx = n_samples // 2
         return [idx] * n_channels
@@ -489,10 +565,114 @@ class DynamicStrainArrivalPickerView(EventView):
         return [float(t[int(i)]) for i in self.picked_idx]
 
     # -------------------------------------------------------------- filter
-    def _set_default_filter_window(self) -> None:
-        ms = DEFAULT_FILTER_WINDOW * self.sample_interval() * 1e3
-        self._filter_window_ms_default = float(f"{ms:.3g}")
-        self.filter_window_ms.set(f"{self._filter_window_ms_default:g}")
+    def record_defaults(self) -> dict:
+        """The entries' defaults for the record shown, by variable name."""
+        dt = self.sample_interval()
+        fs = 1.0 / dt
+
+        def g(value):
+            return f"{float(f'{value:.3g}'):g}"
+        return {"filter_window_ms": g(DEFAULT_FILTER_WINDOW * dt * 1e3),
+                "filter_low_khz": g(DEFAULT_LOW_CORNER_FRACTION * fs / 1e3),
+                "filter_high_khz": g(DEFAULT_HIGH_CORNER_FRACTION * fs / 1e3),
+                "auto_smoothing_var": g(ap.DEFAULT_SMOOTHING_SAMPLES * dt * 1e6)}
+
+    def apply_record_defaults(self) -> None:
+        """Put the record's defaults in the entries that are empty or still hold
+        the previous record's default; an entry the user changed keeps its value."""
+        new = self.record_defaults()
+        for name, value in new.items():
+            var = getattr(self, name)
+            if var.get().strip() in ("", self._defaults.get(name)):
+                var.set(value)
+        self._defaults = new
+
+    def filter_kind(self) -> str:
+        label = self.filter_kind_var.get()
+        return next((k for k in tf.KINDS if tf.KIND_LABELS[k] == label), tf.KIND_OFF)
+
+    @property
+    def filtering(self) -> bool:
+        return self.filter_kind() != tf.KIND_OFF
+
+    def show_filter_rows(self) -> None:
+        """Only the entries the chosen filter uses."""
+        kind = self.filter_kind()
+        for name, widgets in self.filter_rows.items():
+            used = (name == "savgol" and kind == tf.KIND_SAVGOL) or (name == "butterworth" and kind in tf.BUTTERWORTH)
+            for widget, options in widgets:
+                if used:
+                    widget.grid(**options)
+                else:
+                    widget.grid_remove()
+        self.filter_low_entry.configure(state="normal" if tf.uses_low(kind) else "disabled")
+        self.filter_high_entry.configure(state="normal" if tf.uses_high(kind) else "disabled")
+
+    def filter_settings(self) -> dict:
+        """The Trace filter box as settings for :func:`trace_filter.filter_traces`
+        (ValueError, with the reason, when unusable)."""
+        kind = self.filter_kind()
+        if kind == tf.KIND_OFF:
+            return {"kind": kind}
+        if kind == tf.KIND_SAVGOL:
+            return {"kind": kind, "window_samples": self.filter_window(), "polyorder": FILTER_POLYORDER}
+        try:
+            order = int(self.filter_order_var.get())
+        except ValueError:
+            raise ValueError(f"order {self.filter_order_var.get()!r} is not a whole number") from None
+        settings = {"kind": kind, "order": order, "zero_phase": bool(self.zero_phase_var.get())}
+        for key, var, used in (("low_hz", self.filter_low_khz, tf.uses_low(kind)),
+                               ("high_hz", self.filter_high_khz, tf.uses_high(kind))):
+            if not used:
+                continue
+            try:
+                settings[key] = float(var.get()) * 1e3
+            except ValueError:
+                raise ValueError(f"corner {var.get()!r} is not a frequency in kHz") from None
+        tf.check(settings, 1.0 / self.sample_interval())
+        return settings
+
+    def restore_filter(self, saved) -> None:
+        """Show the filter the record's picks were saved with (nothing without one)."""
+        if not isinstance(saved, dict):
+            return
+
+        def value(key, default=None):
+            v = saved.get(key, default)
+            if v is None:
+                return default
+            v = np.asarray(v).ravel()
+            return v[0].decode() if isinstance(v[0], bytes) else v[0].item() if hasattr(v[0], "item") else v[0]
+        kind = str(value("kind", tf.KIND_OFF))
+        if kind not in tf.KINDS:
+            return
+        self.filter_kind_var.set(tf.KIND_LABELS[kind])
+        if kind == tf.KIND_SAVGOL and value("window_samples") is not None:
+            self.filter_window_ms.set(f"{float(value('window_samples')) * self.sample_interval() * 1e3:.6g}")
+        if kind in tf.BUTTERWORTH:
+            self.filter_order_var.set(str(int(value("order", tf.DEFAULT_BUTTER_ORDER))))
+            self.zero_phase_var.set(bool(value("zero_phase", True)))
+            if value("low_hz") is not None:
+                self.filter_low_khz.set(f"{float(value('low_hz')) / 1e3:.6g}")
+            if value("high_hz") is not None:
+                self.filter_high_khz.set(f"{float(value('high_hz')) / 1e3:.6g}")
+        self.show_filter_rows()
+
+    def filtered_traces(self) -> np.ndarray:
+        """The record's traces through the filter; unfiltered, with the reason
+        in the filter note, when the settings are unusable."""
+        block = self.current_block()
+        try:
+            settings = self.filter_settings()
+            problem = ""
+        except ValueError as e:
+            settings, problem = {"kind": tf.KIND_OFF}, str(e)
+        key = (id(block), self.record_key, repr(sorted(settings.items())))
+        if self._filtered is None or self._filtered[0] != key:
+            traces = tf.filter_traces(waveform_data(block), 1.0 / self.sample_interval(), settings)
+            self._filtered = (key, traces)
+        self.update_filter_note(settings, problem)
+        return self._filtered[1]
 
     def filter_window(self) -> int:
         """Savgol window in samples from the window typed in ms; at least
@@ -506,25 +686,39 @@ class DynamicStrainArrivalPickerView(EventView):
             n = DEFAULT_FILTER_WINDOW
         return max(n, MIN_FILTER_WINDOW)
 
-    def on_filter_toggled(self) -> None:
-        self.filtering = bool(self.filter_var.get())
+    def on_filter_changed(self, event=None) -> None:
+        """Redraw the traces through the filter now set (the picks stay)."""
+        self.show_filter_rows()
+        if self.ax_wave is not None:
+            self.xlim = self.ax_wave.get_xlim()
         self.plot()
         self.update_fitted_line()
 
-    def toggle_filter(self) -> None:
-        self.filter_var.set(not self.filter_var.get())
-        self.on_filter_toggled()
+    def set_filter(self, kind: str, **values) -> None:
+        """Choose a filter (``trace_filter.KIND_*``) and, optionally, its entries:
+        ``window_ms``, ``low_khz``, ``high_khz``, ``order``, ``zero_phase``."""
+        self.filter_kind_var.set(tf.KIND_LABELS[kind])
+        for key, var in (("window_ms", self.filter_window_ms), ("low_khz", self.filter_low_khz),
+                         ("high_khz", self.filter_high_khz), ("order", self.filter_order_var)):
+            if key in values:
+                var.set(f"{values[key]:g}" if isinstance(values[key], (int, float)) else str(values[key]))
+        if "zero_phase" in values:
+            self.zero_phase_var.set(bool(values["zero_phase"]))
+        self.on_filter_changed()
 
-    def on_filter_window_changed(self, event=None) -> None:
-        if self.filtering:
-            self.plot()
-            self.update_fitted_line()
+    def update_filter_note(self, settings: dict, problem: str = "") -> None:
+        kind = self.filter_kind()
+        nyquist = f"Nyquist {0.5 / self.sample_interval() / 1e3:g} kHz"
+        if problem:
+            text = f"not applied: {problem}"
+        elif kind == tf.KIND_SAVGOL:
+            text = f"= {settings['window_samples']} samples"
+        elif kind in tf.BUTTERWORTH:
+            text = nyquist + ("; zero phase spreads an onset earlier" if settings.get("zero_phase", True)
+                              else "; causal: onsets delayed")
         else:
-            self.update_filter_note()
-
-    def update_filter_note(self) -> None:
-        n = self.filter_window()
-        self.filter_note_var.set(f"= {n} samples" + ("" if self.filtering else " (filter off)"))
+            text = nyquist
+        self.filter_note_var.set(text)
 
     # ---------------------------------------------------------------- plot
     def on_mechanical_toggled(self) -> None:
@@ -567,22 +761,22 @@ class DynamicStrainArrivalPickerView(EventView):
         self.ax_wave = self.axs[-1]
 
         tt = self.relative_time_s() * 1e3
-        y = np.array(waveform_data(strain), dtype=float, copy=True)
+        y = self.filtered_traces()
         n_channels = y.shape[0]
 
+        if len(self.locations) != n_channels or len(self.placed) != n_channels:
+            xs = self.block_locations(strain, n_channels) or self.default_locations(n_channels, exp_number)
+            self.locations, self.placed = self.place_channels(xs)
         if self.enabled_channels is None or len(self.enabled_channels) != n_channels:
             self.enabled_channels = self.default_enabled_channels(n_channels, exp_number, legacy)
+            if not legacy:
+                self.enabled_channels = list(self.placed) if any(self.placed) else self.enabled_channels
         if self.fitting_channels is None or len(self.fitting_channels) != n_channels:
             self.fitting_channels = self.default_fitting_channels(n_channels, exp_number, legacy)
-        if len(self.locations) != n_channels:
-            self.locations = self.block_locations(strain, n_channels) or self.default_locations(n_channels, exp_number)
-        amplitude = self.trace_amplitude(self.locations)
-
-        if self.filtering:
-            nf = self.filter_window()
-            for i in range(n_channels):
-                y[i, :] = signal.savgol_filter(y[i, :], nf, FILTER_POLYORDER)
-        self.update_filter_note()
+            if not legacy:
+                self.fitting_channels = list(self.placed) if any(self.placed) else self.fitting_channels
+        amplitude = self.trace_amplitude([v for v, ok in zip(self.locations, self.placed) if ok] or self.locations)
+        noise_end = self.noise_end()[0]
 
         self.lines = [None] * n_channels
         line_idx = 0
@@ -591,14 +785,17 @@ class DynamicStrainArrivalPickerView(EventView):
                 continue
             loc = self.locations[i]
             self.ax_wave.plot([tt[0], tt[-1]], [loc, loc], "k:", zorder=-101)
-            span = y[i, :].max() - y[i, :].min()
+            # from the baseline (the noise's median), so a trace on an offset (volts) sits at its sensor
+            base = np.nanmedian(y[i, :max(noise_end, 1)]) if np.isfinite(y[i, :max(noise_end, 1)]).any() else 0.0
+            span = np.nanmax(y[i, :]) - np.nanmin(y[i, :]) if np.isfinite(y[i, :]).any() else 0.0
             ratio = -amplitude / span if span > 0 else 0.0
-            self.lines[i] = self.ax_wave.plot(tt, y[i, :] * ratio + loc, color="C%d" % line_idx, zorder=-100,
-                                              lw=2.0 if i == self.channel else 1.0)[0]
+            self.lines[i] = self.ax_wave.plot(tt, (y[i, :] - base) * ratio + loc, color="C%d" % line_idx,
+                                              zorder=-100, lw=2.0 if i == self.channel else 1.0)[0]
             line_idx += 1
         self.ax_wave.set_ylabel("location along fault (mm)")
         self.ax_wave.set_xlabel("time from the event (ms)")
-        self.ax_wave.set_ylim(max(self.locations) + amplitude, min(self.locations) - amplitude)
+        shown = [self.locations[i] for i in range(n_channels) if self.enabled_channels[i]] or self.locations
+        self.ax_wave.set_ylim(max(shown) + amplitude, min(shown) - amplitude)
         if self.xlim is None:
             self.ax_wave.set_xlim(tt[0], tt[-1])
         else:
@@ -804,7 +1001,8 @@ class DynamicStrainArrivalPickerView(EventView):
     def fit_channels(self) -> list:
         """The channels the line goes through: shown and fitting."""
         return [i for i in range(len(self.picked_idx))
-                if self.enabled_channels[i] and self.fitting_channels[i] and self.lines[i] is not None]
+                if self.enabled_channels[i] and self.fitting_channels[i] and self.lines[i] is not None
+                and (i >= len(self.placed) or self.placed[i])]
 
     def update_fitted_line(self):
         """Cf from one line through the fitted picks, and the rupture front (single
@@ -917,11 +1115,12 @@ class DynamicStrainArrivalPickerView(EventView):
             self.table.delete(*self.table.get_children())
             for i in range(len(self.picked_idx)):
                 shown = bool(self.enabled_channels[i])
+                placed = i >= len(self.placed) or self.placed[i]
                 self.table.insert("", "end", iid=str(i), values=(
-                    names[i] if i < len(names) else f"ch {i}", _ms(self.locations[i]),
+                    names[i] if i < len(names) else f"ch {i}", _ms(self.locations[i]) if placed else "\u2013",
                     _ms(times[i] * 1e3, 5) if shown else "", CHECK if shown else "",
                     CHECK if self.fitting_channels[i] else "",
-                    f"{resid[i] * 1e6:+.3g}" if shown and math.isfinite(resid[i]) else "",
+                    f"{resid[i] * 1e6:+.3g}" if shown and placed and math.isfinite(resid[i]) else "",
                     FLAG_SHORT.get(self.auto_flags[i], self.auto_flags[i]) if i < len(self.auto_flags) else ""))
             if 0 <= self.channel < len(self.picked_idx):
                 self.table.selection_set(str(self.channel))
@@ -970,6 +1169,8 @@ class DynamicStrainArrivalPickerView(EventView):
         self.fitting_channels[i] = bool(value)
         self.draw_markers()
         self.update_fitted_line()
+        if value and i < len(self.placed) and not self.placed[i]:
+            self.update_status(f"{self.channel_names()[i]} has no position in the record: not fitted")
 
     def set_all_shown(self, value: bool = True) -> None:
         self.enabled_channels = [bool(value)] * len(self.enabled_channels)
@@ -1013,7 +1214,8 @@ class DynamicStrainArrivalPickerView(EventView):
             "arrival_time": waveform_time(block)[picked],
             "enabled_channels": [bool(v) for v in self.enabled_channels],
             "fitting_channels": [bool(v) for v in self.fitting_channels],
-            "locations": [float(v) for v in self.locations],
+            "locations": self.saved_locations(),
+            "filter": self.saved_filter(),
             # a degenerate fit has no speed: no nan and no stale value for the CZM fitter to pick up as Cf
             "rupture_speed": float(self.rupture_speed) if self.has_rupture_speed() else None,
             "front_mode": self.front_mode_var.get(),
@@ -1030,18 +1232,27 @@ class DynamicStrainArrivalPickerView(EventView):
         note = "" if self.has_rupture_speed() else " without a rupture speed"
         self.update_status(f"saved to {self.record_key}{note}")
 
+    def saved_filter(self) -> dict:
+        """The filter the traces are drawn with (``kind`` off when its settings are unusable)."""
+        try:
+            return self.filter_settings()
+        except ValueError:
+            return {"kind": tf.KIND_OFF}
+
     # ------------------------------------------------------------ auto pick
     def noise_end(self) -> tuple:
-        """``(index, description)``: the auto pick's noise is the record before
-        ``index``: up to its trigger less a guard, else its first fifth."""
+        """``(index, description)``: the noise (for the auto pick and the traces'
+        baselines) is the record before ``index``: up to its trigger, else the
+        event time, less a guard; else its first fifth."""
         t = waveform_time(self.current_block())
-        t_trig = waveform_trigger_time(self.current_block(), self.get_run(), self.record_key)
-        if t_trig is not None and t[0] < t_trig <= t[-1]:
-            end_t = t_trig - NOISE_TRIGGER_GUARD_FRACTION * (t_trig - t[0])
+        t_ref, name = self.reference_time()
+        if t_ref is not None:
+            end_t = t_ref - NOISE_TRIGGER_GUARD_FRACTION * (t_ref - t[0])
             k = int(np.searchsorted(t, end_t))
             if k >= ap.MIN_NOISE_SAMPLES:
-                return k, f"noise: the record before its trigger, less {NOISE_TRIGGER_GUARD_FRACTION:.0%} of it"
-        return int(NOISE_FRACTION * t.size), f"noise: the first {NOISE_FRACTION:.0%} of the record (no trigger)"
+                where = "its trigger" if name == "trigger" else "the event time"
+                return k, f"noise: the record before {where}, less {NOISE_TRIGGER_GUARD_FRACTION:.0%} of it"
+        return int(NOISE_FRACTION * t.size), f"noise: the first {NOISE_FRACTION:.0%} of the record"
 
     def read_auto_settings(self) -> dict:
         """The Auto pick box as settings (ValueError when unusable)."""
@@ -1082,7 +1293,8 @@ class DynamicStrainArrivalPickerView(EventView):
                 self.picked_idx[i] = int(pick.index)
             self.auto_flags[i] = pick.flag
         t = waveform_time(self.current_block())
-        self.auto_settings = {**settings, "noise_end_s": float(t[min(end, t.size - 1)] - float(self.event["event_time"]))}
+        self.auto_settings = {**settings, "noise_end_s": float(t[min(end, t.size - 1)] - float(self.event["event_time"])),
+                              "filter": self.saved_filter()}
         self.noise_note_var.set(note)
         self.draw_markers()
         self.update_fitted_line()
@@ -1092,7 +1304,7 @@ class DynamicStrainArrivalPickerView(EventView):
                            + (f", {len(flagged)} flagged ({'; '.join(flagged)})" if flagged else ""))
         return picks
 
-    def magic(self):
-        """Auto-pick: the extreme of each enabled (plotted) trace."""
-        return self.auto_pick({"method": ap.METHOD_EXTREME, "threshold": ap.DEFAULT_THRESHOLD,
+    def pick_peaks(self):
+        """Auto pick with the peak method: each shown trace's largest departure from the noise."""
+        return self.auto_pick({"method": ap.METHOD_PEAK, "threshold": ap.DEFAULT_THRESHOLD,
                                "smoothing_samples": ap.DEFAULT_SMOOTHING_SAMPLES})

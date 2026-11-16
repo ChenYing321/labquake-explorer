@@ -7,8 +7,8 @@ arrive (``noise_end``: the samples before it):
   ``|x - median(noise)|``;
 * ``slope``: the size of the trace's slope, ``|dx/dt|`` after a moving
   average over ``smoothing`` samples, against the slope of the noise;
-* ``extreme``: the largest value of the trace (the earlier "Magic" pick: the
-  peak, not the onset).
+* ``peak``: the largest departure from the noise level, ``|x - median(noise)|``
+  (the peak, not the onset; without a noise window, the largest ``|x|``).
 
 For ``difference`` and ``slope`` the threshold is ``threshold`` times the
 noise's spread (``1.4826 * MAD``, so a standard deviation for Gaussian noise).
@@ -34,10 +34,10 @@ from scipy.ndimage import uniform_filter1d
 
 METHOD_DIFFERENCE = "difference"
 METHOD_SLOPE = "slope"
-METHOD_EXTREME = "extreme"
-METHODS = (METHOD_DIFFERENCE, METHOD_SLOPE, METHOD_EXTREME)
+METHOD_PEAK = "peak"
+METHODS = (METHOD_DIFFERENCE, METHOD_SLOPE, METHOD_PEAK)
 METHOD_LABELS = {METHOD_DIFFERENCE: "difference from the noise", METHOD_SLOPE: "slope",
-                 METHOD_EXTREME: "largest value (Magic)"}
+                 METHOD_PEAK: "peak"}
 
 DEFAULT_THRESHOLD = 5.0               # times the noise's spread
 DEFAULT_SMOOTHING_SAMPLES = 5         # slope: the moving average before the derivative
@@ -129,9 +129,16 @@ def pick_slope(x, noise_end: int, threshold: float = DEFAULT_THRESHOLD,
     return Pick(index, spread, float(np.nanmax(measure[noise_end:])), flag)
 
 
-def pick_extreme(x) -> Pick:
+def pick_peak(x, noise_end: int = 0) -> Pick:
+    """The sample of the largest ``|x - median(noise)|`` at or after ``noise_end``."""
     x = np.asarray(x, dtype=float)
-    return Pick(int(np.nanargmax(x)), peak=float(np.nanmax(x)))
+    noise_end = max(0, min(int(noise_end), x.size - 1))
+    centre, spread = robust_spread(x[:noise_end]) if noise_end >= MIN_NOISE_SAMPLES else (0.0, float("nan"))
+    measure = np.abs(x - centre)[noise_end:]
+    if not np.isfinite(measure).any():
+        return Pick(None, flag=FLAG_WEAK)
+    k = int(np.nanargmax(measure))
+    return Pick(noise_end + k, noise=spread, peak=float(measure[k]))
 
 
 def _floor(spread: float, measure) -> float:
@@ -157,11 +164,11 @@ def auto_pick(data, method: str, noise_end: int, threshold: float = DEFAULT_THRE
         elif method == METHOD_SLOPE:
             out.append(pick_slope(x, noise_end, threshold, smoothing, quiet))
         else:
-            out.append(pick_extreme(x))
+            out.append(pick_peak(x, noise_end))
     return out
 
 
-__all__ = ["METHOD_DIFFERENCE", "METHOD_SLOPE", "METHOD_EXTREME", "METHODS", "METHOD_LABELS",
+__all__ = ["METHOD_DIFFERENCE", "METHOD_SLOPE", "METHOD_PEAK", "METHODS", "METHOD_LABELS",
            "DEFAULT_THRESHOLD", "DEFAULT_SMOOTHING_SAMPLES", "DEFAULT_QUIET_SAMPLES", "MIN_NOISE_SAMPLES", "FLAG_WEAK",
            "FLAG_AT_NOISE_END", "FLAG_NO_NOISE", "Pick", "robust_spread", "onset_of_largest",
-           "pick_difference", "pick_slope", "pick_extreme", "auto_pick"]
+           "pick_difference", "pick_slope", "pick_peak", "auto_pick"]

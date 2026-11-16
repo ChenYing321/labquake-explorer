@@ -3,6 +3,7 @@ import pytest
 
 from labquake_explorer.ui.context import resolve_context
 from labquake_explorer.analysis import arrival_picks as ap
+from labquake_explorer.analysis import trace_filter as tf
 from labquake_explorer.ui.views import CZMFitterView, DynamicStrainArrivalPickerView
 
 N_CHANNELS = 16
@@ -104,7 +105,7 @@ def test_identical_picks_away_from_zero_report_na(view):
 
 def test_degenerate_save_removes_stale_speed_and_czm_falls_back(app_with_strain, view):
     dm = app_with_strain.data_manager
-    view.magic()
+    view.pick_peaks()
     view.save()
     good = dm.get_data("runs/[0]/events/[1]/rupture_speed")
     assert np.isfinite(good)
@@ -124,7 +125,7 @@ def test_degenerate_save_removes_stale_speed_and_czm_falls_back(app_with_strain,
         czm.on_close()
 
     # a well-posed save afterwards restores the key and the CZM default
-    view.magic()
+    view.pick_peaks()
     view.save()
     assert dm.get_data("runs/[0]/events/[1]/rupture_speed") == pytest.approx(good)
     czm = CZMFitterView(app_with_strain, 0, 1)
@@ -134,20 +135,21 @@ def test_degenerate_save_removes_stale_speed_and_czm_falls_back(app_with_strain,
         czm.on_close()
 
 
-def test_magic_then_save(app_with_strain, view):
-    view.magic()
+def test_peaks_then_save(app_with_strain, view):
+    view.pick_peaks()
     strain = view.event["strain"]
     raw = strain["original"]["raw"]
     t = strain["original"]["time"]
 
-    # Magic picks the extreme of the plotted (sign-flipped, scaled) trace: a sample on
-    # the saturated plateau of each step (raw at its maximum, up to floating-point
-    # tie-breaking among plateau samples), not the onset itself.
+    # the peak is the largest departure from the noise: a sample on the saturated
+    # plateau of each step, up or down (up to floating-point tie-breaking among
+    # plateau samples), not the onset itself.
     for i, enabled in enumerate(view.enabled_channels):
         if enabled:
             pick = view.picked_idx[i]
-            assert raw[i][pick] == pytest.approx(raw[i].max(), rel=1e-9)
-            assert pick == int(np.argmin(view.lines[i].get_data()[1]))
+            assert abs(raw[i][pick]) == pytest.approx(np.abs(raw[i]).max(), rel=1e-9)
+            drawn = view.lines[i].get_data()[1]
+            assert pick == int(np.argmax(np.abs(drawn - view.locations[i])))
     # all picks trail the true arrivals by a near-constant lag, so Cf is consistent
     truth = view.event["strain_truth"]
     arrival_idx = [int(np.argmin(np.abs(t - a))) for a in truth["arrival_times"]]
@@ -179,7 +181,7 @@ def test_magic_then_save(app_with_strain, view):
 
 
 def test_switch_event_reloads_channel_state(app_with_strain, view):
-    view.magic()
+    view.pick_peaks()
     view.set_fitting(0, True)
     assert view.fitting_channels[0] is True
     assert len(view.fitting_markers) == 5
@@ -210,7 +212,7 @@ def test_switch_event_reloads_channel_state(app_with_strain, view):
 
 
 def test_switch_to_event_without_strain_is_refused(app_with_strain, view, no_dialogs):
-    view.magic()
+    view.pick_peaks()
     picks = list(view.picked_idx)
     speed = view.rupture_speed
     event_2 = app_with_strain.data_manager.get_data("runs/[0]/events/[2]")
@@ -260,15 +262,21 @@ def test_unsaved_channel_edits_do_not_leak_into_data(app_with_strain, view):
     assert app_with_strain.data_manager.get_data("runs/[0]/events/[1]/strain/enabled_channels")[1] is False
 
 
-def test_filter_toggle_keeps_picks(view):
-    view.magic()
+def test_filter_change_keeps_picks(view):
+    view.pick_peaks()
     picks = list(view.picked_idx)
-    view.toggle_filter()
-    assert view.filtering and view.filter_var.get() is True
+    view.set_filter(tf.KIND_SAVGOL)
+    assert view.filtering and view.filter_kind() == tf.KIND_SAVGOL
     assert view.picked_idx == picks
     assert np.isfinite(view.rupture_speed)
-    view.toggle_filter()
-    assert not view.filtering and view.filter_var.get() is False
+    view.set_filter(tf.KIND_OFF)
+    assert not view.filtering
+
+
+def _drawn(view, channel, trace):
+    """A trace as the view draws it: from the noise's median, scaled to 12 mm, at its sensor."""
+    base = np.median(trace[:view.noise_end()[0]])
+    return (trace - base) * (-12 / np.ptp(trace)) + view.locations[channel]
 
 
 def test_filter_window_is_typed_in_ms(view):
@@ -283,28 +291,81 @@ def test_filter_window_is_typed_in_ms(view):
     assert view.filter_window() == 51
     assert float(view.filter_window_ms.get()) == pytest.approx(51 * dt * 1e3, rel=1e-2)
     # a window typed in ms is turned into samples
-    view.filter_window_ms.set(f"{50 * dt * 1e3:.6g}")
-    view.toggle_filter()
+    view.set_filter(tf.KIND_SAVGOL, window_ms=float(f"{50 * dt * 1e3:.6g}"))
     assert view.filter_window() == 50 and "= 50 samples" in view.filter_note_var.get()
     x, y = view.lines[channel].get_data()
-    filtered = signal.savgol_filter(raw[channel], 50, 2)
-    span = filtered.max() - filtered.min()
-    np.testing.assert_allclose(y, filtered * (-12 / span) + view.locations[channel])
+    np.testing.assert_allclose(y, _drawn(view, channel, signal.savgol_filter(raw[channel], 50, 2)))
 
     # a window savgol cannot use is clamped; garbage falls back to 51 samples
     view.filter_window_ms.set(f"{dt * 1e3:.6g}")
-    view.on_filter_window_changed()
+    view.on_filter_changed()
     assert view.filter_window() == 3
     view.filter_window_ms.set("abc")
-    view.on_filter_window_changed()
+    view.on_filter_changed()
     assert view.filter_window() == 51
 
     # with the filter off the traces are the raw ones
-    view.toggle_filter()
+    view.set_filter(tf.KIND_OFF)
     x, y = view.lines[channel].get_data()
-    span = raw[channel].max() - raw[channel].min()
-    np.testing.assert_allclose(y, raw[channel] * (-12 / span) + view.locations[channel])
-    assert "(filter off)" in view.filter_note_var.get()
+    np.testing.assert_allclose(y, _drawn(view, channel, raw[channel]))
+    assert view.filter_note_var.get().startswith("Nyquist")
+
+
+@pytest.mark.parametrize("kind, values", [
+    (tf.KIND_LOWPASS, dict(high_khz=2.0)),
+    (tf.KIND_HIGHPASS, dict(low_khz=0.5)),
+    (tf.KIND_BANDPASS, dict(low_khz=0.5, high_khz=2.0, order=2, zero_phase=False)),
+])
+def test_butterworth_filters_the_drawn_traces(view, kind, values):
+    raw = view.event["strain"]["original"]["raw"]
+    fs = 1.0 / view.sample_interval()
+    channel = next(i for i, f in enumerate(view.fitting_channels) if f)
+    view.set_filter(kind, **values)
+    settings = view.filter_settings()
+    assert settings["kind"] == kind and settings["order"] == values.get("order", 4)
+    assert settings["zero_phase"] is values.get("zero_phase", True)
+    expected = tf.filter_traces(raw[channel:channel + 1], fs, settings)[0]
+    np.testing.assert_allclose(view.lines[channel].get_data()[1], _drawn(view, channel, expected))
+    assert view.filter_note_var.get().startswith(f"Nyquist {fs / 2e3:g} kHz")
+    # only the entries the filter uses are shown; a corner it does not use is disabled
+    assert bool(view.filter_low_entry.instate(["disabled"])) is (kind == tf.KIND_LOWPASS)
+    assert bool(view.filter_high_entry.instate(["disabled"])) is (kind == tf.KIND_HIGHPASS)
+    assert not view.filter_window_entry.winfo_manager()
+
+
+def test_an_unusable_filter_draws_the_raw_traces_and_says_why(view):
+    raw = view.event["strain"]["original"]["raw"]
+    channel = next(i for i, f in enumerate(view.fitting_channels) if f)
+    nyquist_khz = 0.5 / view.sample_interval() / 1e3
+    view.set_filter(tf.KIND_LOWPASS, high_khz=2 * nyquist_khz)
+    assert "not applied" in view.filter_note_var.get() and "Nyquist" in view.filter_note_var.get()
+    np.testing.assert_allclose(view.lines[channel].get_data()[1], _drawn(view, channel, raw[channel]))
+    view.set_filter(tf.KIND_BANDPASS, low_khz=2.0, high_khz=1.0)
+    assert "low corner must be below the high corner" in view.filter_note_var.get()
+    view.save()                                           # an unusable filter is saved as none
+    assert view.event["strain"]["arrivals"]["filter"] == {"kind": "off"}
+
+
+def test_the_filter_is_saved_and_restored(app_with_strain, tmp_path, app_from_file):
+    view = DynamicStrainArrivalPickerView(app_with_strain, 0, 1)
+    try:
+        view.set_filter(tf.KIND_BANDPASS, low_khz=0.5, high_khz=2.0, order=3, zero_phase=False)
+        view.auto_pick()
+        view.save()
+        saved = view.event["strain"]["arrivals"]["filter"]
+        assert saved == {"kind": "bandpass", "order": 3, "zero_phase": False, "low_hz": 500.0, "high_hz": 2000.0}
+        assert view.event["strain"]["arrivals"]["auto_pick"]["filter"] == saved
+    finally:
+        view.on_close()
+    path = tmp_path / "filter.h5"
+    app_with_strain.data_manager.save_file(path)
+    view = DynamicStrainArrivalPickerView(app_from_file(path), 0, 1)
+    try:
+        assert view.filter_kind() == tf.KIND_BANDPASS and view.filter_order_var.get() == "3"
+        assert float(view.filter_low_khz.get()) == 0.5 and float(view.filter_high_khz.get()) == 2.0
+        assert view.zero_phase_var.get() is False and view.status_var.get().endswith("saved")
+    finally:
+        view.on_close()
 
 
 class _Mouse:
@@ -446,7 +507,7 @@ def test_pzt_record_defaults_positions_and_per_record_save(app):
         assert view.trace_amplitude(xs) == 100.0
         lo, hi = view.axs[4].get_ylim()
         assert lo == pytest.approx(500.0) and hi == pytest.approx(0.0)
-        view.magic()
+        view.pick_peaks()
         assert np.isfinite(view.rupture_speed) and abs(view.rupture_speed) == pytest.approx(1500.0, rel=0.05)
         view.save()
         rec = event["waveform"]["elsys"]["arrivals"]
@@ -466,6 +527,84 @@ def test_pzt_record_defaults_positions_and_per_record_save(app):
         view.on_close()
 
 
+def test_a_record_on_an_offset_with_unplaced_channels_and_no_trigger(app, tmp_path, app_from_file):
+    """Like an NI record: eddy-current traces on a few volts of offset, pressure
+    channels without a position, no trigger time.  Every trace is drawn at its
+    sensor from its baseline; the unplaced channels are hidden and not fitted;
+    the noise ends before the event time."""
+    from labquake_explorer.data.channels import channel_array, positions_table
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_event = float(event["event_time"])
+    fs = 2000.0
+    time = t_event - 0.1 + np.arange(1201) / fs
+    xs = [31.0, 93.0, 155.0, 217.0]
+    names = ["pressure_1", "pressure_2"] + [f"eddy_{i + 1}" for i in range(len(xs))]
+    raw = np.zeros((len(names), time.size))
+    raw[0], raw[1] = 3.6, 1.2
+    rng = np.random.default_rng(0)
+    for i, x in enumerate(xs):
+        onset = t_event + 0.005 + (x - xs[0]) * 1e-3 / 50.0      # a slow front: 50 m/s
+        raw[2 + i] = 5.0 + 0.3 * (1.0 + np.tanh((time - onset) / 1e-3)) + 0.002 * rng.standard_normal(time.size)
+    pos = positions_table(names, {n: (x, 0.0, 0.0) for n, x in zip(names[2:], xs)})
+    event.setdefault("waveform", {})["ni"] = channel_array(raw, names, unit="V", positions=pos, time=time,
+                                                           sample_rate=fs, filename="ni.tdms")
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        assert view.record_key == "waveform/ni"
+        assert view.placed == [False, False, True, True, True, True]
+        assert view.locations[2:] == xs and view.locations[:2] == [279.0, 341.0]   # past the last sensor
+        assert view.enabled_channels == view.placed and view.fitting_channels == view.placed
+        assert [view.table.item(str(i), "values")[1] for i in range(2)] == ["\u2013", "\u2013"]
+        assert view.picked_idx[2] == int(np.argmin(np.abs(time - t_event)))      # at the event time
+        assert "before the event time" in view.noise_note_var.get()
+        lo, hi = view.ax_wave.get_ylim()
+        for i in range(2, 6):                                     # each trace within its own band
+            y = view.lines[i].get_data()[1]
+            assert abs(np.median(y[:100]) - xs[i - 2]) < 1.0
+            assert xs[i - 2] - 62.0 <= y.min() and y.max() <= xs[i - 2] + 62.0
+            assert hi < y.min() and y.max() < lo
+        view.auto_pick()
+        assert abs(view.rupture_speed) == pytest.approx(50.0, rel=0.1)
+        # an unplaced channel shown and asked to fit is drawn but kept out of the fit
+        view.set_shown(0, True)
+        view.set_fitting(0, True)
+        assert view.lines[0] is not None and 0 not in view.fit_channels()
+        assert "no position" in view.status_var.get()
+        view.save()
+        rec = event["waveform"]["ni"]["arrivals"]
+        assert np.isnan(rec["locations"][:2]).all() and rec["locations"][2:] == xs
+    finally:
+        view.on_close()
+    path = tmp_path / "ni.h5"
+    app.data_manager.save_file(path)
+    view = DynamicStrainArrivalPickerView(app_from_file(path), 0, 1)
+    try:
+        view.record_combobox.set("waveform/ni")
+        view.on_record_selected()
+        assert view.placed == [False, False, True, True, True, True] and view.locations[2:] == xs
+        assert view.status_var.get().endswith("saved")
+    finally:
+        view.on_close()
+
+
+def test_entry_defaults_follow_the_record_unless_edited(app):
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    add_pzt_record(event, [100.0, 200.0], t_trig, fs=200e3, key="elsys")
+    add_pzt_record(event, [100.0, 200.0], t_trig, fs=2e3, key="ni")
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        assert view.record_key == "waveform/elsys"
+        assert view.filter_high_khz.get() == "20" and view.filter_low_khz.get() == "0.2"
+        view.filter_low_khz.set("1")                                 # edited: kept on the next record
+        view.record_combobox.set("waveform/ni")
+        view.on_record_selected()
+        assert view.filter_high_khz.get() == "0.2" and view.filter_low_khz.get() == "1"
+        assert view.filter_window_ms.get() == "25.5"                 # 51 samples at 2 kHz
+    finally:
+        view.on_close()
+
+
 def test_strain_and_pzt_picks_are_independent(app_with_strain):
     app = app_with_strain
     event = app.data_manager.get_data("runs/[0]/events/[1]")
@@ -474,14 +613,14 @@ def test_strain_and_pzt_picks_are_independent(app_with_strain):
     view = DynamicStrainArrivalPickerView(app, 0, 1)
     try:
         assert view.record_key == "strain" and list(view.record_combobox["values"]) == ["strain", "waveform/elsys"]
-        view.magic()
+        view.pick_peaks()
         view.save()
         strain_speed = app.data_manager.get_data("runs/[0]/events/[1]/rupture_speed")
         strain_picks = list(event["strain"]["original"]["picked_idx"])
         view.record_combobox.set("waveform/elsys")
         view.on_record_selected()
         assert view.record_key == "waveform/elsys" and len(view.picked_idx) == 4
-        view.magic()
+        view.pick_peaks()
         view.save()
         pzt = event["waveform"]["elsys"]["arrivals"]
         assert abs(pzt["rupture_speed"]) == pytest.approx(1500.0, rel=0.05)
@@ -502,7 +641,7 @@ def test_czm_and_pzt_view_read_the_record_arrivals(app):
     t_trig = float(event["event_time"]) - 0.02
     time = add_pzt_record(event, [100.0, 200.0, 300.0, 400.0], t_trig)
     view = DynamicStrainArrivalPickerView(app, 0, 1)
-    view.magic()
+    view.pick_peaks()
     view.save()
     view.on_close()
     arrivals = event["waveform"]["elsys"]["arrivals"]
@@ -576,7 +715,7 @@ def test_zoom_to_picks_and_whole_record(view):
     lo, hi = view.ax_wave.get_xlim()
     t0 = tt[view.picked_idx[0]]
     assert lo < t0 < hi and hi - lo == pytest.approx(100 * (tt[1] - tt[0]), rel=1e-3)   # 50 samples each side
-    view.magic()
+    view.pick_peaks()
     view.zoom_to_picks()
     lo, hi = view.ax_wave.get_xlim()
     times = [tt[view.picked_idx[i]] for i, e in enumerate(view.enabled_channels) if e]
@@ -588,7 +727,7 @@ def test_zoom_to_picks_and_whole_record(view):
 
 def test_mechanical_traces_can_be_hidden(app_with_strain, view):
     try:
-        view.magic()
+        view.pick_peaks()
         picks = list(view.picked_idx)
         view.mechanical_var.set(False)
         view.on_mechanical_toggled()
@@ -677,7 +816,7 @@ def test_the_front_survives_an_hdf5_round_trip_in_both_layouts(app_with_strain, 
     add_bilateral_record(event, XS, 250.0, t_trig)
     view = DynamicStrainArrivalPickerView(app, 0, 1)
     try:
-        view.magic()
+        view.pick_peaks()
         view.front_mode_var.set("bilateral")
         view.update_fitted_line()
         view.save()                                                # the PSU strain record
@@ -686,7 +825,7 @@ def test_the_front_survives_an_hdf5_round_trip_in_both_layouts(app_with_strain, 
         assert "front_mode" not in event["strain"]["original"]   # the historical keys stay where they were
         view.record_combobox.set("waveform/elsys")
         view.on_record_selected()
-        view.magic()
+        view.pick_peaks()
         view.save()                                                # the PZT record, single
     finally:
         view.on_close()
