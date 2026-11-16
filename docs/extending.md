@@ -252,15 +252,19 @@ and PZT picks never overwrite each other:
 | `picked_idx` | picked arrival sample index per channel on the record's `time` |
 | `arrival_time` | the picked arrival times (s, run clock), read by the PZT view's "picked arrival" trigger |
 | `enabled_channels`, `fitting_channels` | one bool per channel: shown, and used in the `Cf` fit |
-| `locations` | sensor position along the fault (mm) per channel, from the record's `positions` table |
-| `rupture_speed` | fitted `Cf` in m/s; absent when the picks define no line |
+| `locations` | sensor position along the fault (mm) per channel, from the record's `positions` table; `NaN` for a channel without one (an NI record's pressure or LVDT channel), which the view hides, draws past the last sensor when shown, and never fits |
+| `filter` | the trace filter the picks were made on (`labquake_explorer/analysis/trace_filter.py`): `kind` `off`, `savgol` (`window_samples`, `polyorder`), or a Butterworth `lowpass`, `highpass` or `bandpass` (`order`, `zero_phase`, and `low_hz` and/or `high_hz`); `off` when the settings shown could not filter the record. Records saved before this key open with the filter left as it was |
+| `rupture_speed` | fitted `Cf` in m/s: one line `time = slope * location` through the fitted picks, `Cf = -1 / slope` (the sign of the published analyses); absent when the picks define no line |
+| `front_mode`, `front` | the rupture front through the same picks, fitted as in `slip_analysis` (`slip_profile.fit_front`): `single` or `bilateral` (two lines meeting at a fitted apex), and `FrontFit.as_dict()` (`valid`, `reason`, `split_x_mm` and `t0_s` of the apex relative to the event time, `segments` with `velocity_m_s` **positive towards +x**, `r2` and `resolved`) plus `use`, the channels fitted. Records saved before these keys open in `single` |
+| `auto_pick` | present once "Auto pick" placed the picks (`labquake_explorer/analysis/arrival_picks.py`): `method` (`difference` from the noise level, `slope`, or `peak`, the largest departure from the noise level), `threshold` (times the noise's spread, 1.4826 MAD), `smoothing_samples` (the slope's moving average), `noise_end_s` (the noise is the record before this time, relative to the event time: its trigger, else the event time, less a tenth of the record before it, else its first fifth), `filter` (as above, the traces it ran on) and `flags` per channel (`weak onset: ...`, `onset at the end of the noise window`, ...; "" when fine, and cleared when that pick is moved by hand). The pick is the onset of the largest change: back from it to the last stretch of at least 10 samples below the threshold, so an oscillating arrival is picked at its start |
 
 The CZM fitter takes its default `Cf` from the strain record's `arrivals`.
 The PSU `strain` layout keeps its historical keys (`strain/original/picked_idx`,
 `strain/original/rupture_arrival_time`, `strain/enabled_channels`,
 `strain/fitting_channels`, `strain/locations`, and `rupture_speed` at the
-event level); `sources.read_arrivals(block, event)` and `write_arrivals`
-hide the difference from the views.
+event level) and puts the keys without a historical place (`front_mode`,
+`front`) in `strain['arrivals']`; `sources.read_arrivals(block, event)` and
+`write_arrivals` hide the difference from the views.
 
 ### `czm_parms` (CZMFitterView, no version)
 

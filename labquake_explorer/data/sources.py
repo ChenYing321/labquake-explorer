@@ -670,12 +670,16 @@ def read_arrivals(block, event: Optional[Mapping] = None) -> dict:
     A waveform record keeps them under ``block['arrivals']``.  The PSU strain
     layout keeps them spread over ``strain/original`` (``picked_idx``,
     ``rupture_arrival_time``), ``strain`` (the flags and locations) and
-    ``event['rupture_speed']``, which is why ``event`` can be passed.
+    ``event['rupture_speed']``, which is why ``event`` can be passed; any further
+    keys (the rupture front) sit in ``strain['arrivals']``.
     """
     out: dict = {}
     if not isinstance(block, Mapping):
         return out
     if _is_legacy_block(block):
+        extra = block.get(ARRIVALS_KEY)
+        if isinstance(extra, Mapping):
+            out.update({k: v for k, v in extra.items() if k != "version"})
         original = block["original"]
         if "picked_idx" in original:
             out["picked_idx"] = original["picked_idx"]
@@ -702,9 +706,16 @@ def read_arrivals(block, event: Optional[Mapping] = None) -> dict:
 def write_arrivals(block, arrivals: Mapping, event=None) -> None:
     """Store Pick Arrivals' results with the record (the inverse of
     :func:`read_arrivals`).  A missing or None ``rupture_speed`` means the
-    picks define no line and removes any stored speed."""
+    picks define no line and removes any stored speed.  In the PSU layout the
+    keys without a historical place go to ``strain['arrivals']``."""
     speed = arrivals.get("rupture_speed")
     if _is_legacy_block(block):
+        extra = {k: v for k, v in arrivals.items()
+                 if k not in ("picked_idx", "arrival_time", "rupture_speed") + _ARRIVAL_FLAGS and v is not None}
+        if extra:
+            block[ARRIVALS_KEY] = {"version": ARRIVALS_VERSION, **extra}
+        else:
+            block.pop(ARRIVALS_KEY, None)
         original = block["original"]
         if "picked_idx" in arrivals:
             original["picked_idx"] = arrivals["picked_idx"]
