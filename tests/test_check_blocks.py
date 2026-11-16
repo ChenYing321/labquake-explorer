@@ -52,7 +52,6 @@ def make_experiment(folder, suffix=".h5", event_fields=None):
 
 
 def edit(path, change):
-    """Load an experiment, apply ``change(data)`` and save it in place."""
     dm = DataManager()
     dm.load_file(path)
     change(dm.data)
@@ -73,7 +72,9 @@ def statuses(report):
 
 
 def test_events_extracted_by_the_reader_pass(tmp_path, capsys):
-    path = make_experiment(tmp_path)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    path = make_experiment(data_dir)
     report = C.check_file(path)
     assert report.skipped == [1]
     assert statuses(report) == ["OK", "OK", "OK", "OK", "NO BLOCK"]
@@ -98,6 +99,22 @@ def test_events_extracted_by_the_reader_pass(tmp_path, capsys):
     assert "not checked (no events or no tpc5 reference): runs 1" in out
     header = next(line for line in out.splitlines() if line.startswith("run  event"))
     assert header.split("  ")[0] == "run" and "missing blocks" in header and header.rstrip().endswith("flags")
+    # a copy away from its raw files cannot be checked, unless told where they are
+    moved = tmp_path / "copy" / path.name
+    moved.parent.mkdir()
+    shutil.copy2(path, moved)
+    report = C.check_file(moved)
+    assert statuses(report) == ["UNCHECKED"] * 5 and report.exit_code() == 2
+    assert C.main([str(moved)]) == 2
+    assert "cannot read" in capsys.readouterr().out
+    assert C.main([str(moved), "--base-dir", str(data_dir)]) == 0
+    assert C.main([str(tmp_path / "nope.h5")]) == 2
+    for name, content in (("bad.h5", b"not an hdf5 file"), ("bad.npz", b"not an npz file"), ("empty.npz", b"")):
+        bad = tmp_path / name
+        bad.write_bytes(content)
+        capsys.readouterr()
+        assert C.main([str(bad)]) == 2
+        assert capsys.readouterr().out.startswith(f"cannot read {bad}: ")
 
 
 EDGE_OFFSET = 2.388939
@@ -255,15 +272,7 @@ def test_fill_never_replaces_a_record_nor_an_existing_backup(tmp_path, capsys):
     assert added == 0 and messages == ["runs/[0]/events/[2]: already has waveform/elsys, left as it is"]
 
 
-def test_fill_without_backup(tmp_path, capsys):
-    path = make_experiment(tmp_path)
-    edit(path, lambda data: drop_record(data, 2))
-    assert C.main([str(path), "--fill", "--no-backup"]) == 0
-    assert not (tmp_path / "t0001.before-fill.h5").exists()
-    assert statuses(C.check_file(path))[2] == "OK"
-
-
-def test_truncated_record_is_flagged(tmp_path):
+def test_truncated_record_is_flagged_and_fill_without_backup(tmp_path, capsys):
     path = make_experiment(tmp_path)
 
     def trim(data):
@@ -276,6 +285,10 @@ def test_truncated_record_is_flagged(tmp_path):
     assert row.status == "OK" and row.truncated and report.n_truncated == 1
     assert row.flags == ["pre-trigger truncated (record: 1900 samples from -0.0250 s; block: 2000 from -0.0300 s)"]
     assert report.exit_code() == 1
+    edit(path, lambda data: drop_record(data, 2))
+    assert C.main([str(path), "--fill", "--no-backup"]) == 1       # filled, but the truncated record stays
+    assert not (tmp_path / "t0001.before-fill.h5").exists()
+    assert statuses(C.check_file(path))[2] == "OK"
 
 
 def test_layout_notes_and_other_measurement_groups(tmp_path, capsys):
@@ -312,8 +325,20 @@ def test_layout_notes_and_other_measurement_groups(tmp_path, capsys):
 
 
 @pytest.mark.parametrize("suffix", [".h5", ".npz"])
-def test_split_file_note_leaves_out_other_runs(tmp_path, suffix):
+def test_csv_split_file_notes_and_window_fallback(tmp_path, capsys, suffix):
     path = make_experiment(tmp_path, suffix=suffix)
+    out_csv = tmp_path / "rows.csv"
+    assert C.main([str(path), "--csv", str(out_csv)]) == 0
+    assert f"wrote {out_csv}" in capsys.readouterr().out
+    with open(out_csv, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert list(rows[0]) == list(C.CSV_COLUMNS) and len(rows) == 5
+    assert [r["status"] for r in rows] == ["OK", "OK", "OK", "OK", "NO BLOCK"]
+    assert [r["expected_block"] for r in rows] == ["b2", "b3", "b5", "b6", ""]
+    assert rows[1]["flags"] == "b3 crosses window start; b4 crosses window end"
+    assert rows[1]["loaded_block"] == "b3" and rows[1]["loaded_samples"] == "2000" and rows[4]["loaded_blocks"] == "0"
+    assert float(rows[0]["window_start_s"]) == pytest.approx(-0.15) and rows[0]["recorder"] == "elsys"
+    # the split-file note names only this run's siblings, not run10 nor the file another run reads
     for name in ("t0001_01_8MPa_run10.tpc5", "t0001_01_8MPa_run1_0002.tpc5", "t0001_01_8MPa_run1b.tpc5"):
         (tmp_path / name).write_bytes(b"")
 
@@ -329,50 +354,12 @@ def test_split_file_note_leaves_out_other_runs(tmp_path, suffix):
     assert C.sibling_files(raw, [tmp_path / "t0001_01_8MPa_run1b.tpc5"]) == [tmp_path / "t0001_01_8MPa_run1_0002.tpc5"]
     assert C.sibling_files(tmp_path / "t0001_01_8MPa_run10.tpc5") == []
 
-
-def test_npz_experiment_window_fallback_and_csv(tmp_path, capsys):
-    path = make_experiment(tmp_path, suffix=".npz")
-    out_csv = tmp_path / "rows.csv"
-    assert C.main([str(path), "--csv", str(out_csv)]) == 0
-    assert f"wrote {out_csv}" in capsys.readouterr().out
-    with open(out_csv, newline="") as f:
-        rows = list(csv.DictReader(f))
-    assert list(rows[0]) == list(C.CSV_COLUMNS) and len(rows) == 5
-    assert [r["status"] for r in rows] == ["OK", "OK", "OK", "OK", "NO BLOCK"]
-    assert [r["expected_block"] for r in rows] == ["b2", "b3", "b5", "b6", ""]
-    assert rows[1]["flags"] == "b3 crosses window start; b4 crosses window end"
-    assert rows[1]["loaded_block"] == "b3" and rows[1]["loaded_samples"] == "2000" and rows[4]["loaded_blocks"] == "0"
-    assert float(rows[0]["window_start_s"]) == pytest.approx(-0.15) and rows[0]["recorder"] == "elsys"
-
-    def no_window(data):                         # without the extraction record: each event's own time axis
+    def no_window(data):                     # without the extraction record: each event's own time axis
         del data["runs"][0]["event_extraction"]
     edit(path, no_window)
     report = C.check_file(path)
     assert statuses(report) == ["OK", "OK", "OK", "OK", "NO BLOCK"]
     assert report.rows[1].window[0] == pytest.approx(EVENTS[1] + OFFSET - 0.15, abs=1e-9)
-
-
-def test_raw_files_elsewhere_and_missing(tmp_path, capsys):
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    path = make_experiment(data_dir)
-    moved = tmp_path / "copy" / path.name
-    moved.parent.mkdir()
-    shutil.copy2(path, moved)
-    report = C.check_file(moved)                                       # the raw file is not next to the copy
-    assert statuses(report) == ["UNCHECKED"] * 5 and report.exit_code() == 2
-    assert C.main([str(moved)]) == 2
-    assert "cannot read" in capsys.readouterr().out
-    assert C.main([str(moved), "--base-dir", str(data_dir)]) == 0
-    assert C.main([str(tmp_path / "nope.h5")]) == 2
-
-
-def test_unreadable_experiment_file(tmp_path, capsys):
-    for name, content in (("bad.h5", b"not an hdf5 file"), ("bad.npz", b"not an npz file"), ("empty.npz", b"")):
-        bad = tmp_path / name
-        bad.write_bytes(content)
-        assert C.main([str(bad)]) == 2
-        assert capsys.readouterr().out.startswith(f"cannot read {bad}: ")
 
 
 def test_file_without_trigger_blocks(tmp_path):
