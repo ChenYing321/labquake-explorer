@@ -39,26 +39,19 @@ def test_a_noise_spike_before_the_arrival_does_not_take_the_pick():
     assert first_above < ONSET - 200                                   # a first-crossing pick would take the spike
 
 
-def test_a_weak_arrival_is_flagged_and_not_picked():
+def test_flags_and_bad_input():
     # 2 noise spreads of arrival: its largest swing with the noise stays below 8 spreads
     (pick,) = ap.auto_pick([trace(amp=0.02)], ap.METHOD_DIFFERENCE, NOISE_END, threshold=8.0)
     assert pick.index is None and pick.flag == ap.FLAG_WEAK
     (pick,) = ap.auto_pick([trace(amp=0.02)], ap.METHOD_DIFFERENCE, NOISE_END, threshold=1.0)
     assert pick.index is not None                                      # a lower threshold accepts it
-
-
-def test_an_arrival_inside_the_noise_window_is_flagged():
-    (pick,) = ap.auto_pick([trace(onset=1990)], ap.METHOD_DIFFERENCE, NOISE_END)
+    (pick,) = ap.auto_pick([trace(onset=1990)], ap.METHOD_DIFFERENCE, NOISE_END)   # arrival inside the noise
     assert pick.index == NOISE_END and pick.flag == ap.FLAG_AT_NOISE_END
-
-
-def test_too_little_noise_and_bad_input():
     (pick,) = ap.auto_pick([trace()], ap.METHOD_SLOPE, 5)
     assert pick.index is None and pick.flag == ap.FLAG_NO_NOISE
-    with pytest.raises(ValueError):
-        ap.auto_pick([trace()], "nope", NOISE_END)
-    with pytest.raises(ValueError):
-        ap.auto_pick([trace()], ap.METHOD_DIFFERENCE, NOISE_END, threshold=0.0)
+    for method, threshold in (("nope", 5.0), (ap.METHOD_DIFFERENCE, 0.0)):
+        with pytest.raises(ValueError):
+            ap.auto_pick([trace()], method, NOISE_END, threshold=threshold)
 
 
 def test_an_oscillation_is_picked_at_its_start_not_at_its_largest_cycle():

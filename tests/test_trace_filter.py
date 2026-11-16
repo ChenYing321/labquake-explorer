@@ -31,11 +31,6 @@ def test_butterworth_keeps_the_band_and_removes_the_rest(kind, values, kept, rem
         assert rms(out[1]) < 0.02 * rms(tone(removed))
 
 
-def test_highpass_removes_an_offset():
-    out = tf.filter_traces([5.0 + 0.1 * tone(10e3)], FS, {"kind": tf.KIND_HIGHPASS, "low_hz": 1e3})
-    assert abs(np.median(out[0][2000:-2000])) < 1e-3
-
-
 def test_a_causal_filter_never_moves_an_onset_earlier():
     onset = 10000
     step = (np.arange(T.size) >= onset).astype(float)
@@ -49,17 +44,16 @@ def test_a_causal_filter_never_moves_an_onset_earlier():
     np.testing.assert_allclose(offset, 3.0, atol=1e-9)
 
 
-def test_savgol_and_off():
-    x = tone(500.0) + 0.1 * np.random.default_rng(0).standard_normal(T.size)
+def test_savgol_off_offsets_and_nans():
     from scipy import signal
+    x = tone(500.0) + 0.1 * np.random.default_rng(0).standard_normal(T.size)
     np.testing.assert_allclose(tf.filter_traces([x], FS, {"kind": tf.KIND_SAVGOL, "window_samples": 21})[0],
                                signal.savgol_filter(x, 21, 2))
     np.testing.assert_array_equal(tf.filter_traces([x], FS, {"kind": tf.KIND_OFF})[0], x)
-
-
-def test_nan_samples_stay_nan():
+    out = tf.filter_traces([5.0 + 0.1 * tone(10e3)], FS, {"kind": tf.KIND_HIGHPASS, "low_hz": 1e3})
+    assert abs(np.median(out[0][2000:-2000])) < 1e-3                   # a high-pass removes an offset
     x = tone(500.0)
-    x[100:110] = np.nan
+    x[100:110] = np.nan                                                # NaN samples stay NaN, the rest finite
     out = tf.filter_traces([x], FS, {"kind": tf.KIND_LOWPASS, "high_hz": 5e3})[0]
     assert np.isnan(out[100:110]).all() and np.isfinite(out[:100]).all() and np.isfinite(out[110:]).all()
 

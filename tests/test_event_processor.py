@@ -58,21 +58,6 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     assert events[2]["waveform"]["elsys"]["block"] == 3
 
 
-def test_source_event_settings_and_no_base_dir(elsys, tmp_path, capsys):
-    run = run_from_tpc5(elsys, ELSYS_MAP, tmp_path, event_fields=["pzt_1"], event_window_s=(0.001, 0.002))
-    ep = EventProcessor(tmp_path / "exp.h5")
-    e = ep.extract_events(run, [index_at(run, 0.5)], window=1.0)[0]
-    high = e["waveform"]["elsys"]
-    # event_fields restrict the channels; a recorder with trigger blocks copies its whole block
-    assert high["channels"] == ["pzt_1"] and high["data"].shape == (1, high["time"].size)
-    assert high["time"].size == pytest.approx(2000, abs=1)
-    assert e["time"].size > 0
-    # without a saved experiment path the references are skipped with a warning, not an error
-    e2 = EventProcessor().extract_events(run, [index_at(run, 0.5)], window=0.05)[0]
-    assert "waveform" not in e2 and "elsys" not in e2 and e2["time"].size > 0
-    assert "raw-data references skipped" in capsys.readouterr().out
-
-
 def test_extract_from_tpc5_ni_run(elsys, tmp_path):
     ni = tmp_path / "T0001-raw-run1-20260101_000000.npz"
     write_ni_npz(ni, {"n": lambda t: 1.867 + 0 * t, "s": lambda t: 0.545 + 0 * t,
@@ -133,14 +118,19 @@ def test_legacy_strain_layout(tmp_path):
     assert e["shear_stress"].shape == e["time"].shape
 
 
-def test_waveform_fields_choice(elsys, tmp_path):
-    run = run_from_tpc5(elsys, ELSYS_MAP, tmp_path, event_fields=["pzt_1"])
+def test_event_fields_window_choice_and_no_base_dir(elsys, tmp_path, capsys):
+    run = run_from_tpc5(elsys, ELSYS_MAP, tmp_path, event_fields=["pzt_1"], event_window_s=(0.001, 0.002))
     ep = EventProcessor(tmp_path / "exp.h5")
+    idx = [index_at(run, 0.5)]
+    e = ep.extract_events(run, idx, window=1.0)[0]
+    high = e["waveform"]["elsys"]
+    # event_fields restrict the channels; a recorder with trigger blocks copies its whole block
+    assert high["channels"] == ["pzt_1"] and high["data"].shape == (1, high["time"].size)
+    assert high["time"].size == pytest.approx(2000, abs=1) and e["time"].size > 0
+    # fields chosen at extraction: all, a list (unknown names ignored), a comma-separated string, none found
     source = ep.open_sources(run)["elsys"]
     everything = list(source.fields)
     assert len(everything) > 1
-    idx = [index_at(run, 0.5)]
-    assert list(ep.extract_events(run, idx, window=0.05)[0]["waveform"]["elsys"]["channels"]) == ["pzt_1"]
     e_all = ep.extract_events(run, idx, window=0.05, fields="all")[0]
     assert list(e_all["waveform"]["elsys"]["channels"]) == everything
     assert e_all["waveform"]["elsys"]["data"].shape[0] == len(everything)
@@ -151,3 +141,7 @@ def test_waveform_fields_choice(elsys, tmp_path):
     missing = ep.extract_events(run, idx, window=0.05, fields=["nope"])[0]
     assert "waveform" not in missing and any("none of the fields" in n for n in missing["notes"])
     assert EventProcessor.waveform_fields(source, None) is None
+    # without a saved experiment path the references are skipped with a warning, not an error
+    e2 = EventProcessor().extract_events(run, idx, window=0.05)[0]
+    assert "waveform" not in e2 and "elsys" not in e2 and e2["time"].size > 0
+    assert "raw-data references skipped" in capsys.readouterr().out
